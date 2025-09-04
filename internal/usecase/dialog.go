@@ -7,7 +7,6 @@ type State string
 const (
 	StateStart        State = "start"
 	StateIntro              = "intro"
-	StateClarify            = "clarify"
 	StatePurpose            = "purpose"
 	StateBedrooms           = "bedrooms"
 	StatePayment            = "payment"
@@ -65,16 +64,11 @@ func (d *Dialog) Handle(s *Session, text string) Reply {
 	switch s.State {
 	case StateIntro:
 		if text == StartBtn {
-			// Сразу задаем первый вопрос без промежуточного сообщения (его пришлём отдельно в обработчике)
+			// Сразу задаем первый вопрос
 			s.State = StatePurpose
 			return Reply{Text: "Для кого вы подбираете квартиру?", Options: []string{PurposeSelf, PurposeRelative, PurposeInvest}, AdvanceTo: StatePurpose}
 		}
 		return Reply{Text: "Нажмите 'Хочу'", Options: []string{StartBtn}}
-
-	case StateClarify:
-		// Этот шаг больше не используется, но оставлен для совместимости
-		s.State = StatePurpose
-		return Reply{Text: "Для кого вы подбираете квартиру?", Options: []string{PurposeSelf, PurposeRelative, PurposeInvest}, AdvanceTo: StatePurpose}
 
 	case StatePurpose:
 		if text == PurposeSelf || text == PurposeRelative || text == PurposeInvest {
@@ -102,7 +96,6 @@ func (d *Dialog) Handle(s *Session, text string) Reply {
 
 	case StateFinalMessage:
 		if text == ChannelWhatsApp {
-			// завершающее инфо
 			return Reply{Text: finalTextForChannel(text), RemoveKeyboard: true, AdvanceTo: StateFinalMessage}
 		}
 		if text == ChannelExpertCall {
