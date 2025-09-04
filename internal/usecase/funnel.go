@@ -74,6 +74,18 @@ func (u *FunnelUsecase) Chart() string {
 	return b.String()
 }
 
+// GraphData возвращает метки и значения по порядку шагов для построения графика
+func (u *FunnelUsecase) GraphData() ([]string, []int) {
+	counts := u.repo.Counts()
+	labels := make([]string, 0, len(u.order))
+	values := make([]int, 0, len(u.order))
+	for _, s := range u.order {
+		labels = append(labels, stateLabel(s))
+		values = append(values, counts[s])
+	}
+	return labels, values
+}
+
 func percent(a, b int) int {
 	if b <= 0 {
 		return 0

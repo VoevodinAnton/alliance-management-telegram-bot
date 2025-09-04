@@ -1,12 +1,15 @@
 package telegram
 
 import (
+	"bytes"
+	"log/slog"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	chart "github.com/wcharczuk/go-chart/v2"
 
 	"alliance-management-telegram-bot/internal/domain"
 	"alliance-management-telegram-bot/internal/usecase"
@@ -23,9 +26,10 @@ type Handler struct {
 	bcastSessions map[int64]*usecase.BroadcastSession
 	funnel        *usecase.FunnelUsecase
 	leadRepo      domain.LeadRepository
+	logger        *slog.Logger
 }
 
-func NewHandler(bot *tgbotapi.BotAPI, dialog *usecase.Dialog, userRepo domain.UserRepository, broadcastUC *usecase.BroadcastUsecase, adminIDs map[int64]struct{}, funnel *usecase.FunnelUsecase) *Handler {
+func NewHandler(bot *tgbotapi.BotAPI, dialog *usecase.Dialog, userRepo domain.UserRepository, broadcastUC *usecase.BroadcastUsecase, adminIDs map[int64]struct{}, funnel *usecase.FunnelUsecase, logger *slog.Logger) *Handler {
 	return &Handler{
 		bot:           bot,
 		dialog:        dialog,
@@ -35,6 +39,7 @@ func NewHandler(bot *tgbotapi.BotAPI, dialog *usecase.Dialog, userRepo domain.Us
 		sessions:      make(map[int64]*usecase.Session),
 		bcastSessions: make(map[int64]*usecase.BroadcastSession),
 		funnel:        funnel,
+		logger:        logger,
 	}
 }
 
@@ -75,18 +80,22 @@ func (h *Handler) Run() {
 			chatID = update.CallbackQuery.Message.Chat.ID
 			text = update.CallbackQuery.Data
 		}
-		// сохранить пользователя для рассылки
 		_ = h.userRepo.SaveUser(chatID)
 
-		// Админ-флоу
 		if text == "/admin" {
 			if !h.isAdmin(chatID) {
 				h.sendText(chatID, "Доступ запрещен")
+				if h.logger != nil {
+					h.logger.Warn("admin denied", "chat_id", chatID)
+				}
 				continue
 			}
 			msg := tgbotapi.NewMessage(chatID, "Админ-меню")
 			msg.ReplyMarkup = inlineKeyboard([]string{"Создать рассылку", "Статистика", "Воронка"})
 			_, _ = h.bot.Send(msg)
+			if h.logger != nil {
+				h.logger.Info("admin opened menu", "chat_id", chatID)
+			}
 			continue
 		}
 		if h.isAdmin(chatID) {
@@ -94,6 +103,9 @@ func (h *Handler) Run() {
 				s := h.getBSession(chatID)
 				msg := h.broadcastUC.Start(s)
 				h.sendTextWithKeyboard(chatID, msg, nil)
+				if h.logger != nil {
+					h.logger.Info("broadcast start", "chat_id", chatID)
+				}
 				continue
 			}
 			if text == "Статистика" {
@@ -102,14 +114,19 @@ func (h *Handler) Run() {
 			}
 			if text == "Воронка" {
 				if h.funnel != nil {
-					h.sendText(chatID, h.funnel.Chart())
+					labels, values := h.funnel.GraphData()
+					if err := h.sendFunnelChart(chatID, labels, values); err != nil {
+						if h.logger != nil {
+							h.logger.Error("funnel chart failed", "error", err)
+						}
+						h.sendText(chatID, h.funnel.Chart())
+					}
 				} else {
 					h.sendText(chatID, "Воронка недоступна")
 				}
 				continue
 			}
 			if s := h.bcastSessions[chatID]; s != nil {
-				// Поддержка приема фото с подписью
 				if m := update.Message; m != nil && len(m.Photo) > 0 {
 					ph := m.Photo[len(m.Photo)-1]
 					fileID := ph.FileID
@@ -126,35 +143,29 @@ func (h *Handler) Run() {
 				case usecase.BStateConfirm:
 					msg, _ := h.broadcastUC.ConfirmSend(s, text)
 					h.sendTextRemoveKeyboard(chatID, msg)
+					if h.logger != nil {
+						h.logger.Info("broadcast confirm", "chat_id", chatID)
+					}
 					continue
 				}
 			}
-			// для админов не отправляем клиентские вопросы
 			continue
 		}
 
-		// Обработка отправки контакта пользователем
 		if update.Message != nil && update.Message.Contact != nil {
 			s := h.getSession(chatID)
 			if s.State == usecase.StateRequestPhone {
 				s.Phone = update.Message.Contact.PhoneNumber
-				// сохранить лид, если подключен репозиторий
 				if h.leadRepo != nil {
-					_ = h.leadRepo.SaveLead(domain.Lead{
-						ChatID:   chatID,
-						Purpose:  s.Purpose,
-						Bedrooms: s.Bedrooms,
-						Payment:  s.Payment,
-						Phone:    s.Phone,
-					})
+					_ = h.leadRepo.SaveLead(domain.Lead{ChatID: chatID, Purpose: s.Purpose, Bedrooms: s.Bedrooms, Payment: s.Payment, Phone: s.Phone})
 				}
-				// отметить шаг lead_saved
 				if h.funnel != nil {
 					h.funnel.Reach(chatID, usecase.StateLeadSaved)
 				}
-				// подтверждаем и убираем клавиатуру
 				h.sendTextRemoveKeyboard(chatID, "Спасибо! Мы получили ваш номер. Наш эксперт свяжется с вами в ближайшее время.")
-				// сброс сессии через время
+				if h.logger != nil {
+					h.logger.Info("lead saved", "chat_id", chatID)
+				}
 				go func(id int64) {
 					time.Sleep(2 * time.Minute)
 					h.sessions[id] = &usecase.Session{State: usecase.StateStart}
@@ -163,14 +174,11 @@ func (h *Handler) Run() {
 			}
 		}
 
-		// Основной клиентский диалог
 		s := h.getSession(chatID)
 		reply := h.dialog.Handle(s, text)
-		// Если пользователь нажал «Хочу», сперва отправим пояснение, затем вопрос
 		if text == usecase.StartBtn {
 			h.sendText(chatID, "Пара уточняющих вопросов, и мы отправим вам подходящие предложения с расчетами")
 		}
-		// Если ожидаем номер телефона — показываем специальную кнопку запроса контакта
 		if s.State == usecase.StateRequestPhone {
 			btn := tgbotapi.NewKeyboardButtonContact("Отправить номер")
 			kb := tgbotapi.NewReplyKeyboard(tgbotapi.NewKeyboardButtonRow(btn))
@@ -281,5 +289,43 @@ func (s *Sender) SendPhoto(chatID int64, fileID string, caption string) error {
 	photo := tgbotapi.NewPhoto(chatID, tgbotapi.FileID(fileID))
 	photo.Caption = caption
 	_, err := s.bot.Send(photo)
+	return err
+}
+
+func (h *Handler) sendFunnelChart(chatID int64, labels []string, values []int) error {
+	bars := make([]chart.Value, 0, len(labels))
+	maxVal := 0
+	for i := range labels {
+		v := values[i]
+		if v > maxVal {
+			maxVal = v
+		}
+		bars = append(bars, chart.Value{Value: float64(v), Label: labels[i]})
+	}
+	// Избежать ошибки invalid data range при нулевых значениях
+	yMax := float64(maxVal)
+	if yMax <= 0 {
+		yMax = 1
+	}
+	graph := chart.BarChart{
+		Width:    1100,
+		Height:   600,
+		BarWidth: 56,
+		Background: chart.Style{Padding: chart.Box{
+			Top:    50,
+			Left:   16,
+			Right:  16,
+			Bottom: 0,
+		}},
+		YAxis: chart.YAxis{Range: &chart.ContinuousRange{Min: 0, Max: yMax}},
+		Bars:  bars,
+	}
+	buf := bytes.NewBuffer(nil)
+	if err := graph.Render(chart.PNG, buf); err != nil {
+		return err
+	}
+	fname := "funnel_" + strconv.FormatInt(time.Now().UnixNano(), 10) + ".png"
+	photo := tgbotapi.NewPhoto(chatID, tgbotapi.FileBytes{Name: fname, Bytes: buf.Bytes()})
+	_, err := h.bot.Send(photo)
 	return err
 }
