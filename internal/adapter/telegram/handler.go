@@ -45,6 +45,13 @@ func NewHandler(bot *tgbotapi.BotAPI, dialog *usecase.Dialog, userRepo domain.Us
 
 func (h *Handler) SetLeadRepository(repo domain.LeadRepository) { h.leadRepo = repo }
 
+// trackFunnel — небольшой хелпер, чтобы не дублировать проверку на nil
+func (h *Handler) trackFunnel(chatID int64, state usecase.State) {
+	if h.funnel != nil {
+		h.funnel.Reach(chatID, state)
+	}
+}
+
 func ParseAdminIDsFromEnv() map[int64]struct{} {
 	ids := map[int64]struct{}{}
 	raw := strings.TrimSpace(os.Getenv("ADMIN_CHAT_IDS"))
@@ -159,13 +166,8 @@ func (h *Handler) Run() {
 				if h.leadRepo != nil {
 					_ = h.leadRepo.SaveLead(domain.Lead{ChatID: chatID, Purpose: s.Purpose, Bedrooms: s.Bedrooms, Payment: s.Payment, Phone: s.Phone})
 				}
-				if h.funnel != nil {
-					h.funnel.Reach(chatID, usecase.StateLeadSaved)
-				}
+				h.trackFunnel(chatID, usecase.StateLeadSaved)
 				h.sendTextRemoveKeyboard(chatID, "Спасибо! Мы получили ваш номер. Наш эксперт свяжется с вами в ближайшее время.")
-				if h.logger != nil {
-					h.logger.Info("lead saved", "chat_id", chatID)
-				}
 				go func(id int64) {
 					time.Sleep(2 * time.Minute)
 					h.sessions[id] = &usecase.Session{State: usecase.StateStart}
@@ -186,14 +188,10 @@ func (h *Handler) Run() {
 			msg := tgbotapi.NewMessage(chatID, reply.Text)
 			msg.ReplyMarkup = kb
 			_, _ = h.bot.Send(msg)
-			if h.funnel != nil {
-				h.funnel.Reach(chatID, s.State)
-			}
+			h.trackFunnel(chatID, s.State)
 			continue
 		}
-		if h.funnel != nil {
-			h.funnel.Reach(chatID, s.State)
-		}
+		h.trackFunnel(chatID, s.State)
 		h.applyReply(chatID, reply)
 
 		if s.State == usecase.StateFinalMessage {
