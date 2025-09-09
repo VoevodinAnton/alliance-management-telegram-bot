@@ -87,7 +87,10 @@ func (h *Handler) Run() {
 			chatID = update.CallbackQuery.Message.Chat.ID
 			text = update.CallbackQuery.Data
 		}
-		_ = h.userRepo.SaveUser(chatID)
+		// сохраняем только не-админов
+		if !h.isAdmin(chatID) {
+			_ = h.userRepo.SaveUser(chatID)
+		}
 
 		if text == "/admin" {
 			if !h.isAdmin(chatID) {
