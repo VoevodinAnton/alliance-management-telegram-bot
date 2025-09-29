@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"bytes"
+	"context"
 	"log/slog"
 	"os"
 	"strconv"
@@ -12,6 +13,7 @@ import (
 	chart "github.com/wcharczuk/go-chart/v2"
 
 	"alliance-management-telegram-bot/internal/domain"
+	"alliance-management-telegram-bot/internal/infra/macrocrm"
 	"alliance-management-telegram-bot/internal/usecase"
 )
 
@@ -26,6 +28,7 @@ type Handler struct {
 	bcastSessions map[int64]*usecase.BroadcastSession
 	funnel        *usecase.FunnelUsecase
 	leadRepo      domain.LeadRepository
+	macroClient   *macrocrm.Client
 	logger        *slog.Logger
 }
 
@@ -44,6 +47,8 @@ func NewHandler(bot *tgbotapi.BotAPI, dialog *usecase.Dialog, userRepo domain.Us
 }
 
 func (h *Handler) SetLeadRepository(repo domain.LeadRepository) { h.leadRepo = repo }
+
+func (h *Handler) SetMacroCRMClient(c *macrocrm.Client) { h.macroClient = c }
 
 // trackFunnel — небольшой хелпер, чтобы не дублировать проверку на nil
 func (h *Handler) trackFunnel(chatID int64, state usecase.State) {
@@ -167,7 +172,34 @@ func (h *Handler) Run() {
 			if s.State == usecase.StateRequestPhone {
 				s.Phone = update.Message.Contact.PhoneNumber
 				if h.leadRepo != nil {
-					_ = h.leadRepo.SaveLead(domain.Lead{ChatID: chatID, Purpose: s.Purpose, Bedrooms: s.Bedrooms, Payment: s.Payment, Phone: s.Phone})
+					ld := domain.Lead{ChatID: chatID, Purpose: s.Purpose, Bedrooms: s.Bedrooms, Payment: s.Payment, Phone: s.Phone}
+					if err := h.leadRepo.SaveLead(ld); err != nil {
+						if h.logger != nil {
+							h.logger.Error("lead save failed", "chat_id", chatID, "error", err)
+						}
+					} else {
+						if h.logger != nil {
+							h.logger.Info("lead saved", "chat_id", chatID)
+						}
+					}
+				}
+				// Отправка лида в MacroCRM (не блокируем поток)
+				if h.macroClient != nil {
+					lead := domain.Lead{ChatID: chatID, Purpose: s.Purpose, Bedrooms: s.Bedrooms, Payment: s.Payment, Phone: s.Phone}
+					go func(id int64, ld domain.Lead) {
+						if h.logger != nil {
+							h.logger.Info("macrocrm send start", "chat_id", id)
+						}
+						if err := h.macroClient.SendLead(context.Background(), ld); err != nil {
+							if h.logger != nil {
+								h.logger.Error("macrocrm send failed", "chat_id", id, "error", err)
+							}
+						} else {
+							if h.logger != nil {
+								h.logger.Info("macrocrm send success", "chat_id", id)
+							}
+						}
+					}(chatID, lead)
 				}
 				h.trackFunnel(chatID, usecase.StateLeadSaved)
 				h.sendTextRemoveKeyboard(chatID, "Спасибо! Мы получили ваш номер. Наш эксперт свяжется с вами в ближайшее время.")

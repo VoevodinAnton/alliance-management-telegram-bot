@@ -8,6 +8,7 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
 	telegramAdapter "alliance-management-telegram-bot/internal/adapter/telegram"
+	"alliance-management-telegram-bot/internal/infra/macrocrm"
 	sqliteRepo "alliance-management-telegram-bot/internal/infra/sqlite"
 	"alliance-management-telegram-bot/internal/usecase"
 )
@@ -67,8 +68,26 @@ func main() {
 		os.Exit(1)
 	}
 
+	// MacroCRM client
+	macroDomain := os.Getenv("MACROCRM_DOMAIN")
+	macroSecret := os.Getenv("MACROCRM_APP_SECRET")
+	macroBase := os.Getenv("MACROCRM_BASE_URL") // опционально, по умолчанию официальный хост
+	var macroClient *macrocrm.Client
+	if macroDomain != "" && macroSecret != "" {
+		opts := []func(*macrocrm.Client){}
+		if macroBase != "" {
+			opts = append(opts, macrocrm.WithBaseURL(macroBase))
+		}
+		macroClient = macrocrm.NewClient(macroDomain, macroSecret, opts...)
+	} else {
+		logger.Warn("macrocrm is not configured: set MACROCRM_DOMAIN and MACROCRM_APP_SECRET to enable CRM sending")
+	}
+
 	adminIDs := telegramAdapter.ParseAdminIDsFromEnv()
 	handler := telegramAdapter.NewHandler(bot, dialog, userRepo, broadcastUC, adminIDs, funnelUC, logger)
 	handler.SetLeadRepository(leadRepo)
+	if macroClient != nil {
+		handler.SetMacroCRMClient(macroClient)
+	}
 	handler.Run()
 }

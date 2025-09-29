@@ -11,12 +11,18 @@
 
 - `TELEGRAM_BOT_TOKEN` — токен Telegram-бота
 - `ADMIN_CHAT_IDS` — список chat_id админов через запятую (например: `111111111,222222222`)
+- `MACROCRM_DOMAIN` — домен, зарегистрированный в MacroCRM (для подписи запроса)
+- `MACROCRM_APP_SECRET` — секрет приложения (App_secret) для генерации `token`
+- `MACROCRM_BASE_URL` — (опционально) базовый URL API, по умолчанию `https://api.macro.sbercrm.com`
 
 Пример (macOS/Linux):
 
 ```bash
 export TELEGRAM_BOT_TOKEN=123456:ABC...
 export ADMIN_CHAT_IDS=111111111,222222222
+export MACROCRM_DOMAIN=example.ru
+export MACROCRM_APP_SECRET=your_app_secret
+# export MACROCRM_BASE_URL=https://api.macro.sbercrm.com
 ```
 
 ## Установка и запуск
