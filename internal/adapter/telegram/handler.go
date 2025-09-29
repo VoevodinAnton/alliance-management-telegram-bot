@@ -214,7 +214,7 @@ func (h *Handler) Run() {
 		s := h.getSession(chatID)
 		reply := h.dialog.Handle(s, text)
 		if text == usecase.StartBtn {
-			h.sendText(chatID, "Пара уточняющих вопросов, и мы отправим вам подходящие предложения с расчетами")
+			h.sendText(chatID, "Несколько уточняющих вопросов, и мы отправим вам подходящее предложение уже через пару минут.")
 		}
 		if s.State == usecase.StateRequestPhone {
 			btn := tgbotapi.NewKeyboardButtonContact("Отправить номер")
@@ -269,13 +269,61 @@ func (h *Handler) applyReply(chatID int64, r usecase.Reply) {
 		msg := tgbotapi.NewMessage(chatID, r.Text)
 		msg.ReplyMarkup = tgbotapi.NewRemoveKeyboard(true)
 		_, _ = h.bot.Send(msg)
+		// Попробуем отправить релевантный PDF каталог
+		s := h.getSession(chatID)
+		h.sendCatalogPDF(chatID, s)
 		return
 	}
 	if len(r.Options) > 0 {
 		h.sendTextWithKeyboard(chatID, r.Text, r.Options)
+		// Если следующий шаг — запрос телефона, всё равно приложим каталог прямо сейчас
+		if r.AdvanceTo == usecase.StateRequestPhone {
+			s := h.getSession(chatID)
+			h.sendCatalogPDF(chatID, s)
+		}
 		return
 	}
+	// Если финальное сообщение и присутствует релевантный pdf — отправим документ
+	// Определим по текущей сессии
+	s := h.getSession(chatID)
+	if s.State == usecase.StateFinalMessage {
+		filePath := usecase.CatalogFileFor(s)
+		if strings.TrimSpace(filePath) != "" {
+			// Отправим текст
+			h.sendText(chatID, r.Text)
+			// Попробуем отправить документ из локальной папки collections
+			doc := tgbotapi.NewDocument(chatID, tgbotapi.FilePath(filePath))
+			if _, err := h.bot.Send(doc); err != nil {
+				if h.logger != nil {
+					h.logger.Error("send catalog pdf failed", "chat_id", chatID, "file", filePath, "error", err)
+				}
+			} else {
+				if h.logger != nil {
+					h.logger.Info("catalog pdf sent", "chat_id", chatID, "file", filePath)
+				}
+			}
+			return
+		}
+	}
 	h.sendText(chatID, r.Text)
+}
+
+// sendCatalogPDF отправляет документ из папки collections согласно текущему выбору пользователя
+func (h *Handler) sendCatalogPDF(chatID int64, s *usecase.Session) {
+	filePath := usecase.CatalogFileFor(s)
+	if strings.TrimSpace(filePath) == "" {
+		return
+	}
+	doc := tgbotapi.NewDocument(chatID, tgbotapi.FilePath(filePath))
+	if _, err := h.bot.Send(doc); err != nil {
+		if h.logger != nil {
+			h.logger.Error("send catalog pdf failed", "chat_id", chatID, "file", filePath, "error", err)
+		}
+		return
+	}
+	if h.logger != nil {
+		h.logger.Info("catalog pdf sent", "chat_id", chatID, "file", filePath)
+	}
 }
 
 func (h *Handler) sendText(chatID int64, text string) {
