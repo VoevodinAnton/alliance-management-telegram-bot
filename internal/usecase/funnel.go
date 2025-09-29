@@ -25,7 +25,6 @@ func NewFunnelUsecase(repo FunnelRepository) *FunnelUsecase {
 			StatePayment,
 			StateRequestPhone,
 			StateLeadSaved,
-			StateFinalMessage,
 		},
 	}
 }
@@ -118,11 +117,11 @@ func stateLabel(s State) string {
 	case StatePayment:
 		return "Оплата"
 	case StateRequestPhone:
-		return "Телефон"
+		return "Запрос номера"
 	case StateLeadSaved:
 		return "Лид"
 	case StateFinalMessage:
-		return "Финал"
+		return "Оффер и каталог"
 	default:
 		return string(s)
 	}

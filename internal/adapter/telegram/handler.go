@@ -5,8 +5,10 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -30,19 +32,26 @@ type Handler struct {
 	leadRepo      domain.LeadRepository
 	macroClient   *macrocrm.Client
 	logger        *slog.Logger
+
+	// cache for telegram file_ids to speed up repeated sends
+	catalogMu      sync.RWMutex
+	catalogFileID  map[string]string
+	catalogPhotoID map[string]string
 }
 
 func NewHandler(bot *tgbotapi.BotAPI, dialog *usecase.Dialog, userRepo domain.UserRepository, broadcastUC *usecase.BroadcastUsecase, adminIDs map[int64]struct{}, funnel *usecase.FunnelUsecase, logger *slog.Logger) *Handler {
 	return &Handler{
-		bot:           bot,
-		dialog:        dialog,
-		userRepo:      userRepo,
-		broadcastUC:   broadcastUC,
-		adminIDs:      adminIDs,
-		sessions:      make(map[int64]*usecase.Session),
-		bcastSessions: make(map[int64]*usecase.BroadcastSession),
-		funnel:        funnel,
-		logger:        logger,
+		bot:            bot,
+		dialog:         dialog,
+		userRepo:       userRepo,
+		broadcastUC:    broadcastUC,
+		adminIDs:       adminIDs,
+		sessions:       make(map[int64]*usecase.Session),
+		bcastSessions:  make(map[int64]*usecase.BroadcastSession),
+		funnel:         funnel,
+		logger:         logger,
+		catalogFileID:  make(map[string]string),
+		catalogPhotoID: make(map[string]string),
 	}
 }
 
@@ -171,43 +180,36 @@ func (h *Handler) Run() {
 			s := h.getSession(chatID)
 			if s.State == usecase.StateRequestPhone {
 				s.Phone = update.Message.Contact.PhoneNumber
-				if h.leadRepo != nil {
-					ld := domain.Lead{ChatID: chatID, Purpose: s.Purpose, Bedrooms: s.Bedrooms, Payment: s.Payment, Phone: s.Phone}
-					if err := h.leadRepo.SaveLead(ld); err != nil {
-						if h.logger != nil {
-							h.logger.Error("lead save failed", "chat_id", chatID, "error", err)
-						}
-					} else {
-						if h.logger != nil {
-							h.logger.Info("lead saved", "chat_id", chatID)
-						}
-					}
-				}
-				// Отправка лида в MacroCRM (не блокируем поток)
-				if h.macroClient != nil {
-					lead := domain.Lead{ChatID: chatID, Purpose: s.Purpose, Bedrooms: s.Bedrooms, Payment: s.Payment, Phone: s.Phone}
-					go func(id int64, ld domain.Lead) {
-						if h.logger != nil {
-							h.logger.Info("macrocrm send start", "chat_id", id)
-						}
-						if err := h.macroClient.SendLead(context.Background(), ld); err != nil {
-							if h.logger != nil {
-								h.logger.Error("macrocrm send failed", "chat_id", id, "error", err)
-							}
-						} else {
-							if h.logger != nil {
-								h.logger.Info("macrocrm send success", "chat_id", id)
-							}
-						}
-					}(chatID, lead)
-				}
-				h.trackFunnel(chatID, usecase.StateLeadSaved)
-				h.sendTextRemoveKeyboard(chatID, "Спасибо! Мы получили ваш номер. Наш эксперт свяжется с вами в ближайшее время.")
+				h.saveAndSendLead(chatID, s)
 				go func(id int64) {
 					time.Sleep(2 * time.Minute)
 					h.sessions[id] = &usecase.Session{State: usecase.StateStart}
 				}(chatID)
 				continue
+			}
+		}
+
+		// Принимаем номер текстом, если включен StateRequestPhone
+		if update.Message != nil {
+			rawText := strings.TrimSpace(update.Message.Text)
+			if rawText != "" && !strings.HasPrefix(rawText, "/") { // не перехватывать команды типа /start
+				s := h.getSession(chatID)
+				if s.State == usecase.StateRequestPhone {
+					candidate := rawText
+					if looksLikePhone(candidate) {
+						s.Phone = candidate
+						h.saveAndSendLead(chatID, s)
+						go func(id int64) {
+							time.Sleep(2 * time.Minute)
+							h.sessions[id] = &usecase.Session{State: usecase.StateStart}
+						}(chatID)
+						continue
+					} else {
+						h.sendText(chatID, "Похоже, это не номер телефона. Пришлите номер в формате +7XXXXXXXXXX или нажмите кнопку ‘Отправить номер’.")
+						h.trackFunnel(chatID, s.State)
+						continue
+					}
+				}
 			}
 		}
 
@@ -223,6 +225,8 @@ func (h *Handler) Run() {
 			msg := tgbotapi.NewMessage(chatID, reply.Text)
 			msg.ReplyMarkup = kb
 			_, _ = h.bot.Send(msg)
+			// Сразу приложим релевантный каталог (асинхронно с кэшем file_id)
+			h.sendCatalogPDF(chatID, s)
 			h.trackFunnel(chatID, s.State)
 			continue
 		}
@@ -236,6 +240,43 @@ func (h *Handler) Run() {
 			}(chatID)
 		}
 	}
+}
+
+// saveAndSendLead сохраняет лид, отправляет в MacroCRM и уведомляет пользователя
+func (h *Handler) saveAndSendLead(chatID int64, s *usecase.Session) {
+	if s == nil {
+		return
+	}
+	if h.leadRepo != nil {
+		ld := domain.Lead{ChatID: chatID, Purpose: s.Purpose, Bedrooms: s.Bedrooms, Payment: s.Payment, Phone: s.Phone}
+		if err := h.leadRepo.SaveLead(ld); err != nil {
+			if h.logger != nil {
+				h.logger.Error("lead save failed", "chat_id", chatID, "error", err)
+			}
+		} else {
+			if h.logger != nil {
+				h.logger.Info("lead saved", "chat_id", chatID)
+			}
+		}
+		if h.macroClient != nil {
+			go func(id int64, ld domain.Lead) {
+				if h.logger != nil {
+					h.logger.Info("macrocrm send start", "chat_id", id)
+				}
+				if err := h.macroClient.SendLead(context.Background(), ld); err != nil {
+					if h.logger != nil {
+						h.logger.Error("macrocrm send failed", "chat_id", id, "error", err)
+					}
+				} else {
+					if h.logger != nil {
+						h.logger.Info("macrocrm send success", "chat_id", id)
+					}
+				}
+			}(chatID, ld)
+		}
+	}
+	h.trackFunnel(chatID, usecase.StateLeadSaved)
+	h.sendTextRemoveKeyboard(chatID, "Спасибо! Мы получили ваш номер. Наш эксперт свяжется с вами в ближайшее время.")
 }
 
 func (h *Handler) isAdmin(chatID int64) bool {
@@ -283,28 +324,7 @@ func (h *Handler) applyReply(chatID int64, r usecase.Reply) {
 		}
 		return
 	}
-	// Если финальное сообщение и присутствует релевантный pdf — отправим документ
-	// Определим по текущей сессии
-	s := h.getSession(chatID)
-	if s.State == usecase.StateFinalMessage {
-		filePath := usecase.CatalogFileFor(s)
-		if strings.TrimSpace(filePath) != "" {
-			// Отправим текст
-			h.sendText(chatID, r.Text)
-			// Попробуем отправить документ из локальной папки collections
-			doc := tgbotapi.NewDocument(chatID, tgbotapi.FilePath(filePath))
-			if _, err := h.bot.Send(doc); err != nil {
-				if h.logger != nil {
-					h.logger.Error("send catalog pdf failed", "chat_id", chatID, "file", filePath, "error", err)
-				}
-			} else {
-				if h.logger != nil {
-					h.logger.Info("catalog pdf sent", "chat_id", chatID, "file", filePath)
-				}
-			}
-			return
-		}
-	}
+	// Финального шага выбора канала больше нет
 	h.sendText(chatID, r.Text)
 }
 
@@ -314,16 +334,90 @@ func (h *Handler) sendCatalogPDF(chatID int64, s *usecase.Session) {
 	if strings.TrimSpace(filePath) == "" {
 		return
 	}
-	doc := tgbotapi.NewDocument(chatID, tgbotapi.FilePath(filePath))
-	if _, err := h.bot.Send(doc); err != nil {
-		if h.logger != nil {
-			h.logger.Error("send catalog pdf failed", "chat_id", chatID, "file", filePath, "error", err)
+	go func(path string) {
+		// try send preview image before PDF if exists
+		base := strings.TrimSuffix(path, filepath.Ext(path))
+		for _, ext := range []string{".jpg", ".jpeg", ".png"} {
+			preview := base + ext
+			if _, err := os.Stat(preview); err == nil {
+				// cached photo id?
+				h.catalogMu.RLock()
+				cachedPhoto := h.catalogPhotoID[preview]
+				h.catalogMu.RUnlock()
+				if strings.TrimSpace(cachedPhoto) != "" {
+					photo := tgbotapi.NewPhoto(chatID, tgbotapi.FileID(cachedPhoto))
+					if _, err := h.bot.Send(photo); err == nil {
+						if h.logger != nil {
+							h.logger.Info("catalog preview sent via cache", "chat_id", chatID, "file", preview)
+						}
+						break
+					}
+					if h.logger != nil {
+						h.logger.Warn("cached photo_id failed, uploading preview", "chat_id", chatID, "file", preview)
+					}
+				}
+				// upload preview
+				photo := tgbotapi.NewPhoto(chatID, tgbotapi.FilePath(preview))
+				msg, err := h.bot.Send(photo)
+				if err == nil {
+					if len(msg.Photo) > 0 {
+						// take last size id
+						sizes := msg.Photo
+						id := sizes[len(sizes)-1].FileID
+						if strings.TrimSpace(id) != "" {
+							h.catalogMu.Lock()
+							h.catalogPhotoID[preview] = id
+							h.catalogMu.Unlock()
+						}
+					}
+					if h.logger != nil {
+						h.logger.Info("catalog preview sent", "chat_id", chatID, "file", preview)
+					}
+				} else {
+					if h.logger != nil {
+						h.logger.Error("send catalog preview failed", "chat_id", chatID, "file", preview, "error", err)
+					}
+				}
+				break
+			}
 		}
-		return
-	}
-	if h.logger != nil {
-		h.logger.Info("catalog pdf sent", "chat_id", chatID, "file", filePath)
-	}
+		// try cached file_id first
+		h.catalogMu.RLock()
+		cachedID := h.catalogFileID[path]
+		h.catalogMu.RUnlock()
+
+		if strings.TrimSpace(cachedID) != "" {
+			if h.logger != nil {
+				h.logger.Info("catalog pdf send via cache", "chat_id", chatID, "file", path)
+			}
+			doc := tgbotapi.NewDocument(chatID, tgbotapi.FileID(cachedID))
+			if _, err := h.bot.Send(doc); err == nil {
+				return
+			}
+			// fallback to upload if cached id failed
+			if h.logger != nil {
+				h.logger.Warn("cached file_id failed, uploading file", "chat_id", chatID, "file", path)
+			}
+		}
+
+		// upload file and cache file_id
+		doc := tgbotapi.NewDocument(chatID, tgbotapi.FilePath(path))
+		msg, err := h.bot.Send(doc)
+		if err != nil {
+			if h.logger != nil {
+				h.logger.Error("send catalog pdf failed", "chat_id", chatID, "file", path, "error", err)
+			}
+			return
+		}
+		if msg.Document != nil && strings.TrimSpace(msg.Document.FileID) != "" {
+			h.catalogMu.Lock()
+			h.catalogFileID[path] = msg.Document.FileID
+			h.catalogMu.Unlock()
+		}
+		if h.logger != nil {
+			h.logger.Info("catalog pdf sent", "chat_id", chatID, "file", path)
+		}
+	}(filePath)
 }
 
 func (h *Handler) sendText(chatID int64, text string) {
@@ -353,6 +447,31 @@ func inlineKeyboard(opts []string) tgbotapi.InlineKeyboardMarkup {
 		))
 	}
 	return tgbotapi.InlineKeyboardMarkup{InlineKeyboard: rows}
+}
+
+// простая эвристика валидации телефона
+func looksLikePhone(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return false
+	}
+	// допускаем +7, 7, 8 в начале и 10-11 цифр суммарно
+	digits := 0
+	for _, r := range s {
+		if r >= '0' && r <= '9' {
+			digits++
+		}
+	}
+	if strings.HasPrefix(s, "+7") && digits == 11 {
+		return true
+	}
+	if (strings.HasPrefix(s, "8") || strings.HasPrefix(s, "7")) && digits == 11 {
+		return true
+	}
+	if digits == 10 { // без кода страны
+		return true
+	}
+	return false
 }
 
 // Реализация отправителя для юзкейсов

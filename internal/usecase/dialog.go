@@ -89,23 +89,14 @@ func (d *Dialog) Handle(s *Session, text string) Reply {
 	case StatePayment:
 		if text == PaymentCash || text == PaymentInstallment || text == PaymentMortgage || text == PaymentTradeIn {
 			s.Payment = text
-			s.State = StateFinalMessage
-			return Reply{Text: "Где вам комфортнее получить подборку?", Options: []string{ChannelWhatsApp, ChannelExpertCall}, AdvanceTo: StateFinalMessage}
+			// Сразу отдаём ценность и просим номер
+			s.State = StateRequestPhone
+			msg := finalTextForSelection(s) + "\n\n" + "Оставьте номер — вышлю точный расчет и 2–3 альтернативы."
+			return Reply{Text: msg, AdvanceTo: StateRequestPhone}
 		}
 		return Reply{Text: "Пожалуйста, выберите способ оплаты", Options: []string{PaymentCash, PaymentInstallment, PaymentMortgage, PaymentTradeIn}}
 
-	case StateFinalMessage:
-		if text == ChannelWhatsApp {
-			// Итоговое сообщение и упоминание релевантного каталога
-			return Reply{Text: finalTextForSelection(s), RemoveKeyboard: true, AdvanceTo: StateFinalMessage}
-		}
-		if text == ChannelExpertCall {
-			// Итоговое сообщение + просьба оставить номер
-			s.State = StateRequestPhone
-			msg := finalTextForSelection(s) + "\n\n" + "Оставьте, пожалуйста, номер телефона — удобнее всего нажать кнопку ниже."
-			return Reply{Text: msg, AdvanceTo: StateRequestPhone}
-		}
-		return Reply{Text: "Пожалуйста, выберите канал", Options: []string{ChannelWhatsApp, ChannelExpertCall}}
+		// Шаг выбора канала удалён
 	}
 
 	return Reply{Text: "Не понял команду"}
