@@ -58,6 +58,7 @@ func WithAction(action string) func(*Client) {
 
 // SendLead формирует запрос на создание заявки в MacroCRM.
 // Отправляет минимум телефон и текстовое описание, остальное — как есть из структуры лида.
+// Реализация интерфейса usecase.LeadDelivery
 func (c *Client) SendLead(ctx context.Context, lead domain.Lead) error {
 	if c == nil {
 		return errors.New("macrocrm client is nil")

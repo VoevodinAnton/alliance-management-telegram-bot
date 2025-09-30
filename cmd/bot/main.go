@@ -87,7 +87,8 @@ func main() {
 	handler := telegramAdapter.NewHandler(bot, dialog, userRepo, broadcastUC, adminIDs, funnelUC, logger)
 	handler.SetLeadRepository(leadRepo)
 	if macroClient != nil {
-		handler.SetMacroCRMClient(macroClient)
+		// внедряем как абстракцию доставки лида
+		handler.SetLeadDelivery(macroClient)
 	}
 	handler.Run()
 }
