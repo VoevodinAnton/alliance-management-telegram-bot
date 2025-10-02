@@ -232,12 +232,7 @@ func (h *Handler) Run() {
 		h.trackFunnel(chatID, s.State)
 		h.applyReply(chatID, reply)
 
-		if s.State == usecase.StateFinalMessage {
-			go func(id int64) {
-				time.Sleep(2 * time.Minute)
-				h.sessions[id] = &usecase.Session{State: usecase.StateStart}
-			}(chatID)
-		}
+		// финального шага нет — очистку сессии выполняем после RequestPhone/LeadSaved
 	}
 }
 
