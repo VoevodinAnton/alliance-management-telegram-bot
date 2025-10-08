@@ -214,8 +214,16 @@ func (h *Handler) Run() {
 
 		s := h.getSession(chatID)
 		reply := h.dialog.Handle(s, text)
-		if text == usecase.StartBtn {
-			h.sendText(chatID, "Несколько уточняющих вопросов, и мы отправим вам подходящее предложение уже через пару минут.")
+		// Спец-логика для /start: отправить приветствие и сразу второе сообщение с кнопкой "Хочу"
+		if text == "/start" {
+			// 1) Приветствие (HTML)
+			msg := tgbotapi.NewMessage(chatID, reply.Text)
+			msg.ParseMode = tgbotapi.ModeHTML
+			_, _ = h.bot.Send(msg)
+			// 2) Сообщение с кнопкой "Хочу"
+			h.sendTextWithKeyboard(chatID, "Несколько уточняющих вопросов, и мы отправим вам подходящее предложение уже через пару минут.", []string{usecase.StartBtn})
+			h.trackFunnel(chatID, s.State)
+			continue
 		}
 		if s.State == usecase.StateRequestPhone {
 			btn := tgbotapi.NewKeyboardButtonContact("Отправить номер")

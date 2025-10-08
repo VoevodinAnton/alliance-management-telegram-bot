@@ -39,6 +39,33 @@ go build -o bin/bot ./cmd/bot
 TELEGRAM_BOT_TOKEN=123456:ABC... ADMIN_CHAT_IDS=111111111,222222222 ./bin/bot
 ```
 
+## Docker
+
+### Быстрый старт через docker-compose
+
+1. Подготовьте переменные окружения:
+
+```bash
+export TELEGRAM_BOT_TOKEN=123456:ABC...
+export ADMIN_CHAT_IDS=111111111,222222222
+export MACROCRM_DOMAIN=example.ru
+export MACROCRM_APP_SECRET=your_app_secret
+# export MACROCRM_BASE_URL=https://api.macro.sbercrm.com
+```
+
+2. Запустите из Docker Hub:
+
+```bash
+docker compose pull && docker compose up -d
+```
+
+Каталоги:
+
+- `./data` монтируется в контейнер как `/data` (SQLite по умолчанию `/data/leads.db`)
+- `./collections` монтируется как `/app/collections` (только чтение)
+
+Здоровье: сервис публикует healthcheck на `http://localhost:8080`.
+
 По умолчанию бот стартует в режиме long polling и поднимает healthcheck на `:8080`.
 
 ## Локальная проверка

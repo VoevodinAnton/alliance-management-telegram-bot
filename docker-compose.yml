@@ -1,0 +1,18 @@
+version: "3.9"
+services:
+  bot:
+    image: avoeva/zim-gallery-bot:latest
+    container_name: zim-gallery-bot
+    environment:
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - ADMIN_CHAT_IDS=${ADMIN_CHAT_IDS}
+      - MACROCRM_DOMAIN=${MACROCRM_DOMAIN}
+      - MACROCRM_APP_SECRET=${MACROCRM_APP_SECRET}
+      - MACROCRM_BASE_URL=${MACROCRM_BASE_URL}
+      - LEADS_SQLITE_DSN=/data/leads.db
+    volumes:
+      - ./data:/data
+      - ./collections:/app/collections:ro
+    restart: unless-stopped
+    ports:
+      - "10043:8080"
