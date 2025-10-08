@@ -38,6 +38,15 @@ func (r *UserRepo) SaveUser(chatID int64) error {
 	return err
 }
 
+func (r *UserRepo) HasUser(chatID int64) (bool, error) {
+	var cnt int
+	err := r.db.QueryRow(`SELECT COUNT(1) FROM users WHERE chat_id=?`, chatID).Scan(&cnt)
+	if err != nil {
+		return false, err
+	}
+	return cnt > 0, nil
+}
+
 func (r *UserRepo) ListChatIDs() ([]int64, error) {
 	rows, err := r.db.Query(`SELECT chat_id FROM users`)
 	if err != nil {

@@ -38,6 +38,8 @@ type Session struct {
 	Bedrooms string
 	Payment  string
 	Phone    string
+	Promo    bool
+	PromoTag string
 }
 
 type Reply struct {

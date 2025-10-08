@@ -3,6 +3,7 @@ package telegram
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -96,12 +97,27 @@ func (h *Handler) Run() {
 		if update.Message != nil {
 			chatID = update.Message.Chat.ID
 			text = update.Message.Text
+			// Отметим промо-переход (deep-link /start promo)
+			if strings.HasPrefix(text, "/start ") {
+				arg := strings.TrimSpace(strings.TrimPrefix(text, "/start "))
+				if strings.HasPrefix(arg, "promo") { // поддержка promo, promo_*
+					s := h.getSession(chatID)
+					s.Promo = true
+					s.PromoTag = arg
+				}
+			}
 		} else if update.CallbackQuery != nil {
 			chatID = update.CallbackQuery.Message.Chat.ID
 			text = update.CallbackQuery.Data
 		}
-		// сохраняем только не-админов
+		// сохраняем только не-админов; перед этим узнаем, был ли пользователь ранее
+		knownUser := false
 		if !h.isAdmin(chatID) {
+			if h.userRepo != nil {
+				if ok, err := h.userRepo.HasUser(chatID); err == nil {
+					knownUser = ok
+				}
+			}
 			_ = h.userRepo.SaveUser(chatID)
 		}
 
@@ -114,7 +130,7 @@ func (h *Handler) Run() {
 				continue
 			}
 			msg := tgbotapi.NewMessage(chatID, "Админ-меню")
-			msg.ReplyMarkup = inlineKeyboard([]string{"Создать рассылку", "Статистика", "Воронка"})
+			msg.ReplyMarkup = inlineKeyboard([]string{"Создать рассылку", "Статистика", "Воронка", "DAU"})
 			_, _ = h.bot.Send(msg)
 			if h.logger != nil {
 				h.logger.Info("admin opened menu", "chat_id", chatID)
@@ -149,6 +165,26 @@ func (h *Handler) Run() {
 				}
 				continue
 			}
+			if text == "DAU" {
+				if h.funnel != nil {
+					labels, values := h.funnel.DailyActive(7)
+					if err := h.sendFunnelChart(chatID, labels, values); err != nil {
+						if h.logger != nil {
+							h.logger.Error("dau chart failed", "error", err)
+						}
+						// fallback в текстовом виде
+						var b strings.Builder
+						b.WriteString("DAU за 14 дней:\n")
+						for i := range labels {
+							fmt.Fprintf(&b, "%s — %d\n", labels[i], values[i])
+						}
+						h.sendText(chatID, b.String())
+					}
+				} else {
+					h.sendText(chatID, "DAU недоступен")
+				}
+				continue
+			}
 			if s := h.bcastSessions[chatID]; s != nil {
 				if m := update.Message; m != nil && len(m.Photo) > 0 {
 					ph := m.Photo[len(m.Photo)-1]
@@ -158,10 +194,22 @@ func (h *Handler) Run() {
 					h.sendTextWithKeyboard(chatID, msg, opts)
 					continue
 				}
+				if m := update.Message; m != nil && m.Document != nil {
+					fileID := m.Document.FileID
+					caption := m.Caption
+					msg, opts := h.broadcastUC.ReceiveDocument(s, fileID, caption)
+					h.sendTextWithKeyboard(chatID, msg, opts)
+					continue
+				}
 				switch s.State {
 				case usecase.BStateEnter:
-					msg, opts, _ := h.broadcastUC.ReceiveText(s, text)
-					h.sendTextWithKeyboard(chatID, msg, opts)
+					// Принимаем текст только если он не пустой; иначе ждём фото/документ
+					if strings.TrimSpace(text) != "" {
+						msg, opts, _ := h.broadcastUC.ReceiveText(s, text)
+						h.sendTextWithKeyboard(chatID, msg, opts)
+						continue
+					}
+					// пустой текст — игнорируем, ждём контент
 					continue
 				case usecase.BStateConfirm:
 					msg, _ := h.broadcastUC.ConfirmSend(s, text)
@@ -213,9 +261,100 @@ func (h *Handler) Run() {
 		}
 
 		s := h.getSession(chatID)
+		// Спец-флоу промо: если /start promo
+		if s.Promo && strings.HasPrefix(text, "/start ") && knownUser {
+			// Промо флоу только для уже существующих пользователей (проверено до SaveUser)
+			if !knownUser {
+				// Новый пользователь — идёт по обычной воронке
+				s.Promo = false
+			} else {
+				// если телефон есть — сразу предложим слоты
+				hasPhone := false
+				if h.leadRepo != nil {
+					if ok, err := h.leadRepo.HasPhone(chatID); err == nil {
+						hasPhone = ok
+					}
+				}
+				if hasPhone {
+					promoText := "Добрый день! Вас заинтересовала наша эксклюзивная финансовая программа. Давайте свяжу вас с нашим адвайзером: расскажет об условиях, ответит на вопросы и рассчитает выгоду с учетом привилегий. В какое время вам удобно завтра принять звонок?"
+					slots := []string{"11:00-13:00", "14:00-16:00", "17:00-19:00"}
+					h.sendTextWithKeyboard(chatID, promoText, slots)
+					// если номер есть — сохранять лид будем после выбора слота текстом
+					s.State = usecase.StateFinalMessage
+					h.trackFunnel(chatID, s.State)
+					continue
+				}
+				// нет телефона — идем по обычной воронке (приветствие + кнопка "Хочу")
+				s.Promo = false
+			}
+		}
+
+		// Обработка /start (включая /start promo): всегда отправляем приветствие + кнопку "Хочу"
+		if strings.HasPrefix(text, "/start") {
+			// Принудительно обработаем как обычный старт
+			// Это установит s.State = StateIntro и вернет приветствие
+			startReply := h.dialog.Handle(s, "/start")
+			msg := tgbotapi.NewMessage(chatID, startReply.Text)
+			msg.ParseMode = tgbotapi.ModeHTML
+			_, _ = h.bot.Send(msg)
+			h.sendTextWithKeyboard(chatID, "Несколько уточняющих вопросов, и мы отправим вам подходящее предложение уже через пару минут.", []string{usecase.StartBtn})
+			h.trackFunnel(chatID, s.State)
+			// Сбрасываем промо-флаг, чтобы не показывать слоты после обычного старта
+			s.Promo = false
+			continue
+		}
+
+		// Обработка выбора слота времени (независимо от promo)
+		if text == "11:00-13:00" || text == "14:00-16:00" || text == "17:00-19:00" {
+			// Сохраним выбор слота в БД
+			if h.leadRepo != nil {
+				if err := h.leadRepo.UpdateLastLeadSlotAndSource(chatID, text, s.PromoTag); err != nil {
+					if h.logger != nil {
+						h.logger.Error("update slot/source failed", "chat_id", chatID, "error", err)
+					}
+				}
+			}
+			// Проверим актуально ли запрашивать номер прямо сейчас
+			phone := ""
+			if h.leadRepo != nil {
+				phone, _ = h.leadRepo.GetLastPhone(chatID)
+			}
+			if strings.TrimSpace(phone) == "" {
+				// Номера нет — идем по воронке, запросим по стандартному сценарию
+				s.Promo = false
+				h.trackFunnel(chatID, s.State)
+				// Никаких специальных сообщений — управление вернется в диалог ниже
+				// чтобы пользователь получил стандартные вопросы
+				continue
+			}
+			// Телефон есть — подтверждаем и отправляем лид с указанным слотом
+			h.sendText(chatID, fmt.Sprintf("Отлично! Отмечу время %s. Наш адвайзер свяжется с вами завтра в выбранный промежуток.", text))
+			if h.leadDelivery != nil {
+				ld := domain.Lead{ChatID: chatID, Phone: phone, Slot: text, Source: s.PromoTag}
+				go func(id int64, lead domain.Lead) {
+					if h.logger != nil {
+						h.logger.Info("macrocrm send start", "chat_id", id)
+					}
+					if err := h.leadDelivery.SendLead(context.Background(), lead); err != nil {
+						if h.logger != nil {
+							h.logger.Error("macrocrm send failed", "chat_id", id, "error", err)
+						}
+					} else {
+						if h.logger != nil {
+							h.logger.Info("macrocrm send success", "chat_id", id)
+						}
+					}
+				}(chatID, ld)
+			}
+			go func(id int64) {
+				time.Sleep(2 * time.Minute)
+				h.sessions[id] = &usecase.Session{State: usecase.StateStart}
+			}(chatID)
+			continue
+		}
 		reply := h.dialog.Handle(s, text)
 		// Спец-логика для /start: отправить приветствие и сразу второе сообщение с кнопкой "Хочу"
-		if text == "/start" {
+		if strings.HasPrefix(text, "/start") {
 			// 1) Приветствие (HTML)
 			msg := tgbotapi.NewMessage(chatID, reply.Text)
 			msg.ParseMode = tgbotapi.ModeHTML
@@ -252,7 +391,14 @@ func (h *Handler) saveAndSendLead(chatID int64, s *usecase.Session) {
 		return
 	}
 	if h.leadRepo != nil {
-		ld := domain.Lead{ChatID: chatID, Purpose: s.Purpose, Bedrooms: s.Bedrooms, Payment: s.Payment, Phone: s.Phone}
+		// Подставляем slot только для промо-сценария, чтобы не тянуть старый слот в новую воронку
+		slot := ""
+		if strings.TrimSpace(s.PromoTag) != "" {
+			if v, err := h.leadRepo.GetLastSlot(chatID); err == nil {
+				slot = v
+			}
+		}
+		ld := domain.Lead{ChatID: chatID, Purpose: s.Purpose, Bedrooms: s.Bedrooms, Payment: s.Payment, Phone: s.Phone, Slot: slot, Source: s.PromoTag}
 		if err := h.leadRepo.SaveLead(ld); err != nil {
 			if h.logger != nil {
 				h.logger.Error("lead save failed", "chat_id", chatID, "error", err)
@@ -496,6 +642,13 @@ func (s *Sender) SendPhoto(chatID int64, fileID string, caption string) error {
 	photo := tgbotapi.NewPhoto(chatID, tgbotapi.FileID(fileID))
 	photo.Caption = caption
 	_, err := s.bot.Send(photo)
+	return err
+}
+
+func (s *Sender) SendDocument(chatID int64, fileID string, caption string) error {
+	doc := tgbotapi.NewDocument(chatID, tgbotapi.FileID(fileID))
+	doc.Caption = caption
+	_, err := s.bot.Send(doc)
 	return err
 }
 

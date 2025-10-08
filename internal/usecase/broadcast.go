@@ -22,6 +22,7 @@ type BroadcastRepository interface {
 type BroadcastSender interface {
 	SendText(chatID int64, text string) error
 	SendPhoto(chatID int64, fileID string, caption string) error
+	SendDocument(chatID int64, fileID string, caption string) error
 }
 
 type BroadcastStat struct {
@@ -41,6 +42,7 @@ type BroadcastSession struct {
 	Text        string
 	PhotoFileID string
 	Caption     string
+	DocFileID   string
 }
 
 type BroadcastUsecase struct {
@@ -58,7 +60,8 @@ func (u *BroadcastUsecase) Start(s *BroadcastSession) string {
 	s.Text = ""
 	s.PhotoFileID = ""
 	s.Caption = ""
-	return "Введите текст рассылки сообщением или пришлите фото с подписью."
+	s.DocFileID = ""
+	return "Введите текст рассылки сообщением или пришлите фото/документ (PDF) с подписью."
 }
 
 func (u *BroadcastUsecase) ReceiveText(s *BroadcastSession, text string) (string, []string, error) {
@@ -68,6 +71,7 @@ func (u *BroadcastUsecase) ReceiveText(s *BroadcastSession, text string) (string
 	s.Text = text
 	s.PhotoFileID = ""
 	s.Caption = ""
+	s.DocFileID = ""
 	s.State = BStateConfirm
 	return "Подтвердите отправку рассылки:", []string{"Отправить", "Отмена"}, nil
 }
@@ -79,8 +83,21 @@ func (u *BroadcastUsecase) ReceivePhoto(s *BroadcastSession, fileID, caption str
 	s.PhotoFileID = fileID
 	s.Caption = caption
 	s.Text = ""
+	s.DocFileID = ""
 	s.State = BStateConfirm
 	return "Подтвердите отправку рассылки с фото:", []string{"Отправить", "Отмена"}
+}
+
+func (u *BroadcastUsecase) ReceiveDocument(s *BroadcastSession, fileID, caption string) (string, []string) {
+	if strings.TrimSpace(fileID) == "" {
+		return "Не удалось получить документ. Пришлите файл ещё раз.", nil
+	}
+	s.DocFileID = fileID
+	s.Caption = caption
+	s.Text = ""
+	s.PhotoFileID = ""
+	s.State = BStateConfirm
+	return "Подтвердите отправку рассылки с документом:", []string{"Отправить", "Отмена"}
 }
 
 func (u *BroadcastUsecase) ConfirmSend(s *BroadcastSession, cmd string) (string, error) {
@@ -103,6 +120,13 @@ func (u *BroadcastUsecase) ConfirmSend(s *BroadcastSession, cmd string) (string,
 		var sendErr error
 		if s.PhotoFileID != "" {
 			sendErr = u.Sender.SendPhoto(id, s.PhotoFileID, s.Caption)
+		} else if s.DocFileID != "" {
+			// caption у документа ограничен; передаём Caption, если есть, иначе Text
+			cap := s.Caption
+			if strings.TrimSpace(cap) == "" {
+				cap = s.Text
+			}
+			sendErr = u.Sender.SendDocument(id, s.DocFileID, cap)
 		} else {
 			sendErr = u.Sender.SendText(id, s.Text)
 		}

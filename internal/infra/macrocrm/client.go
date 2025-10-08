@@ -79,13 +79,26 @@ func (c *Client) SendLead(ctx context.Context, lead domain.Lead) error {
 	form.Set("time", tsStr)
 	form.Set("token", token)
 	form.Set("action", c.Action)
+	if src := strings.TrimSpace(lead.Source); src != "" {
+		// Передаем источник как несколько полей на всякий случай
+		form.Set("source", src)
+		form.Set("utm_source", src)
+	}
 
 	// Полезные поля заявки
 	form.Set("phone", lead.Phone)
 	// Имя можем не знать; оставим пустым или возьмем из Purpose, если это имя — но пока пусто
 	form.Set("name", "Тест")
 	// Сформируем читабельное сообщение без указания chat_id
-	msg := fmt.Sprintf("Заявка из Telegram\nЦель: %s\nСпальни: %s\nОплата: %s", lead.Purpose, lead.Bedrooms, lead.Payment)
+	extra := ""
+	if strings.TrimSpace(lead.Slot) != "" {
+		extra = "\nВремя звонка: " + lead.Slot
+	}
+	srcLine := ""
+	if src := strings.TrimSpace(lead.Source); src != "" {
+		srcLine = "\nИсточник: " + src
+	}
+	msg := fmt.Sprintf("Заявка из Telegram\nЦель: %s\nСпальни: %s\nОплата: %s%s%s", lead.Purpose, lead.Bedrooms, lead.Payment, extra, srcLine)
 	form.Set("message", msg)
 
 	endpoint := strings.TrimRight(c.BaseURL, "/") + "/estate/request/"

@@ -2,12 +2,16 @@ package usecase
 
 import (
 	"fmt"
+	"log/slog"
 	"strings"
+	"time"
 )
 
 type FunnelRepository interface {
 	Hit(state State, chatID int64) error
 	Counts() map[State]int
+	// DailyActiveCounts возвращает количество уникальных chat_id по дням (YYYY-MM-DD) за последние days дней
+	DailyActiveCounts(days int) map[string]int
 }
 
 type FunnelUsecase struct {
@@ -83,6 +87,35 @@ func (u *FunnelUsecase) GraphData() ([]string, []int) {
 		values = append(values, counts[s])
 	}
 	return labels, values
+}
+
+// DailyActive возвращает метки дней и значения DAU за последние days дней (включая сегодня)
+func (u *FunnelUsecase) DailyActive(days int) ([]string, []int) {
+	if days <= 0 {
+		days = 7
+	}
+	counts := u.repo.DailyActiveCounts(days)
+	// логируем сырые значения DAU для отладки
+	if len(counts) == 0 {
+		slog.Default().Info("dau counts empty", "days", days)
+	} else {
+		slog.Default().Info("dau counts", "days", days, "counts", counts)
+	}
+	labels := make([]string, 0, days)
+	values := make([]int, 0, days)
+	// построим последовательность дат, чтобы заполнить нулями пропуски
+	for i := days - 1; i >= 0; i-- {
+		d := dateMinus(i)
+		labels = append(labels, d)
+		values = append(values, counts[d])
+	}
+	return labels, values
+}
+
+// dateMinus возвращает YYYY-MM-DD для сегодняшней даты минус deltaDays
+func dateMinus(deltaDays int) string {
+	d := time.Now().AddDate(0, 0, -deltaDays)
+	return d.Format("2006-01-02")
 }
 
 func percent(a, b int) int {

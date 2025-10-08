@@ -7,6 +7,7 @@ type User struct {
 type UserRepository interface {
 	SaveUser(chatID int64) error
 	ListChatIDs() ([]int64, error)
+	HasUser(chatID int64) (bool, error)
 }
 
 // Abstraction for sending messages (implemented by Telegram adapter)

@@ -27,3 +27,10 @@ func (r *UserRepo) ListChatIDs() ([]int64, error) {
 	}
 	return res, nil
 }
+
+func (r *UserRepo) HasUser(chatID int64) (bool, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	_, ok := r.chatID[chatID]
+	return ok, nil
+}
