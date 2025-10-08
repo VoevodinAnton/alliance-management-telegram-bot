@@ -219,6 +219,7 @@ func (h *Handler) Run() {
 			// 1) Приветствие (HTML)
 			msg := tgbotapi.NewMessage(chatID, reply.Text)
 			msg.ParseMode = tgbotapi.ModeHTML
+			msg.ParseMode = tgbotapi.ModeHTML
 			_, _ = h.bot.Send(msg)
 			// 2) Сообщение с кнопкой "Хочу"
 			h.sendTextWithKeyboard(chatID, "Несколько уточняющих вопросов, и мы отправим вам подходящее предложение уже через пару минут.", []string{usecase.StartBtn})
@@ -230,6 +231,7 @@ func (h *Handler) Run() {
 			kb := tgbotapi.NewReplyKeyboard(tgbotapi.NewKeyboardButtonRow(btn))
 			kb.ResizeKeyboard = true
 			msg := tgbotapi.NewMessage(chatID, reply.Text)
+			msg.ParseMode = tgbotapi.ModeHTML
 			msg.ReplyMarkup = kb
 			_, _ = h.bot.Send(msg)
 			// Сразу приложим релевантный каталог (асинхронно с кэшем file_id)
@@ -310,6 +312,7 @@ func (h *Handler) getBSession(chatID int64) *usecase.BroadcastSession {
 func (h *Handler) applyReply(chatID int64, r usecase.Reply) {
 	if r.RemoveKeyboard {
 		msg := tgbotapi.NewMessage(chatID, r.Text)
+		msg.ParseMode = tgbotapi.ModeHTML
 		msg.ReplyMarkup = tgbotapi.NewRemoveKeyboard(true)
 		_, _ = h.bot.Send(msg)
 		// Попробуем отправить релевантный PDF каталог
@@ -429,6 +432,7 @@ func (h *Handler) sendText(chatID int64, text string) {
 
 func (h *Handler) sendTextWithKeyboard(chatID int64, text string, opts []string) {
 	msg := tgbotapi.NewMessage(chatID, text)
+	msg.ParseMode = tgbotapi.ModeHTML
 	if len(opts) > 0 {
 		msg.ReplyMarkup = inlineKeyboard(opts)
 	}
@@ -483,6 +487,7 @@ func NewSender(bot *tgbotapi.BotAPI) *Sender { return &Sender{bot: bot} }
 
 func (s *Sender) SendText(chatID int64, text string) error {
 	msg := tgbotapi.NewMessage(chatID, text)
+	msg.ParseMode = tgbotapi.ModeHTML
 	_, err := s.bot.Send(msg)
 	return err
 }
