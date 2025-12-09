@@ -6,7 +6,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"alliance-management-telegram-bot/internal/domain"
+	"zim-gallery-bot/internal/domain"
 )
 
 type LeadRepo struct {

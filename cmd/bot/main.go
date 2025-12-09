@@ -4,17 +4,31 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strconv"
+	"strings"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
-	telegramAdapter "alliance-management-telegram-bot/internal/adapter/telegram"
-	"alliance-management-telegram-bot/internal/infra/macrocrm"
-	sqliteRepo "alliance-management-telegram-bot/internal/infra/sqlite"
-	"alliance-management-telegram-bot/internal/usecase"
+	telegramAdapter "zim-gallery-bot/internal/adapter/telegram"
+	"zim-gallery-bot/internal/infra/macrocrm"
+	sqliteRepo "zim-gallery-bot/internal/infra/sqlite"
+	"zim-gallery-bot/internal/infra/telelog"
+	"zim-gallery-bot/internal/usecase"
 )
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	// Логгер: stdout + опционально в Telegram
+	baseHandler := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})
+	var logHandler slog.Handler = baseHandler
+	if chat := os.Getenv("LOG_CHAT_ID"); chat != "" {
+		if id, err := strconv.ParseInt(chat, 10, 64); err == nil {
+			// Bot API уже создадим ниже и подменим логгер после инициализации
+			// временно используем базовый, потом пересоздадим logger
+			_ = id
+		}
+	}
+	logger := slog.New(logHandler)
+	slog.SetDefault(logger)
 
 	token := os.Getenv("TELEGRAM_BOT_TOKEN")
 	if token == "" {
@@ -34,6 +48,27 @@ func main() {
 		os.Exit(1)
 	}
 	bot.Debug = false
+
+	// Если указан LOG_CHAT_ID — добавим телеграм-хендлер
+	if chat := os.Getenv("LOG_CHAT_ID"); chat != "" {
+		if id, err := strconv.ParseInt(chat, 10, 64); err == nil {
+			// Поддержка отдельного бота для логов
+			logBot := bot
+			if logTok := os.Getenv("LOG_BOT_TOKEN"); strings.TrimSpace(logTok) != "" {
+				if lb, err := tgbotapi.NewBotAPI(logTok); err == nil {
+					logBot = lb
+				} else {
+					logger.Warn("log bot init failed, fallback to main bot", "error", err)
+				}
+			}
+			th := telelog.NewTelegramHandler(logBot, id, slog.LevelInfo)
+			mh := telelog.NewMultiHandler(baseHandler, th)
+			logger = slog.New(mh)
+			slog.SetDefault(logger)
+		}
+	}
+
+	// Лог после настройки телеграм-хендлера, чтобы он попал в лог-чат
 	logger.Info("bot authorized", "username", bot.Self.UserName)
 
 	// SQLite DSN для всех хранилищ

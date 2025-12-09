@@ -1,4 +1,4 @@
-module alliance-management-telegram-bot
+module zim-gallery-bot
 
 go 1.23.0
 

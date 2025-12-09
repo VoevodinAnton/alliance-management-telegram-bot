@@ -3,7 +3,7 @@ package usecase
 import (
 	"context"
 
-	"alliance-management-telegram-bot/internal/domain"
+	"zim-gallery-bot/internal/domain"
 )
 
 // LeadDelivery описывает внешний канал доставки лида (CRM, вебхуки и т.п.)

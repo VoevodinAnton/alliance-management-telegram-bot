@@ -10,6 +10,8 @@ services:
       - MACROCRM_APP_SECRET=${MACROCRM_APP_SECRET}
       - MACROCRM_BASE_URL=${MACROCRM_BASE_URL}
       - LEADS_SQLITE_DSN=/data/leads.db
+      - LOG_CHAT_ID=${LOG_CHAT_ID}
+      - LOG_BOT_TOKEN=${LOG_BOT_TOKEN}
     volumes:
       - ./data:/data
       - ./collections:/app/collections:ro

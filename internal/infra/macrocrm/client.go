@@ -7,13 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
-	"alliance-management-telegram-bot/internal/domain"
+	"zim-gallery-bot/internal/domain"
 )
 
 // Client отправляет лиды в MacroCRM (SberCRM)
@@ -87,8 +88,10 @@ func (c *Client) SendLead(ctx context.Context, lead domain.Lead) error {
 
 	// Полезные поля заявки
 	form.Set("phone", lead.Phone)
-	// Имя можем не знать; оставим пустым или возьмем из Purpose, если это имя — но пока пусто
-	form.Set("name", "Тест")
+	// Имя пользователя, если известно
+	if strings.TrimSpace(lead.Name) != "" {
+		form.Set("name", lead.Name)
+	}
 	// Сформируем читабельное сообщение без указания chat_id
 	extra := ""
 	if strings.TrimSpace(lead.Slot) != "" {
@@ -102,6 +105,32 @@ func (c *Client) SendLead(ctx context.Context, lead domain.Lead) error {
 	form.Set("message", msg)
 
 	endpoint := strings.TrimRight(c.BaseURL, "/") + "/estate/request/"
+
+	// Логируем тело запроса (маскируем token) в человекочитаемом виде
+	{
+		masked := url.Values{}
+		for k, vals := range form {
+			if strings.EqualFold(k, "token") {
+				masked[k] = []string{"***"}
+				continue
+			}
+			vv := make([]string, len(vals))
+			copy(vv, vals)
+			masked[k] = vv
+		}
+		fields := map[string]string{
+			"action":     masked.Get("action"),
+			"domain":     masked.Get("domain"),
+			"name":       masked.Get("name"),
+			"phone":      masked.Get("phone"),
+			"message":    masked.Get("message"),
+			"source":     masked.Get("source"),
+			"utm_source": masked.Get("utm_source"),
+			"time":       masked.Get("time"),
+			"token":      masked.Get("token"), // будет "***"
+		}
+		slog.Info("macrocrm send lead", "endpoint", endpoint, "params", fields)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
 	if err != nil {
 		return err
@@ -113,10 +142,17 @@ func (c *Client) SendLead(ctx context.Context, lead domain.Lead) error {
 		return err
 	}
 	defer resp.Body.Close()
-	// MacroCRM обычно возвращает 200; считаем успешным любой 2xx
+	// Прочитаем тело для логики ошибок MacroCRM (иногда 200, но строкой ошибка)
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	bodyStr := strings.TrimSpace(string(body))
+	slog.Info("macrocrm response", "status", resp.StatusCode, "body", bodyStr)
+	// MacroCRM обычно возвращает 200; считаем успешным любой 2xx, но проверим содержание
 	if resp.StatusCode/100 != 2 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return fmt.Errorf("macrocrm non-2xx: %d: %s", resp.StatusCode, string(body))
+		return fmt.Errorf("macrocrm non-2xx: %d: %s", resp.StatusCode, bodyStr)
+	}
+	low := strings.ToLower(bodyStr)
+	if strings.Contains(low, "error") || strings.Contains(low, "ошибка") || strings.Contains(low, "fail") {
+		return fmt.Errorf("macrocrm 2xx but error body: %s", bodyStr)
 	}
 	return nil
 }

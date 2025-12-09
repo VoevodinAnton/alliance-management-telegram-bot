@@ -38,6 +38,7 @@ type Session struct {
 	Bedrooms string
 	Payment  string
 	Phone    string
+	Name     string
 	Promo    bool
 	PromoTag string
 }
@@ -106,7 +107,7 @@ func finalTextForSelection(s *Session) string {
 	var offer string
 	switch s.Payment {
 	case PaymentCash:
-		offer = "Те, кто использует <b>100% собственных средств</b> при оплате, могут получить <u>специальную премию от 3% до 7% от цены квартиры</u>. Хотите получить подробный расчет?"
+		offer = "Те, кто использует <b>100% собственных средств</b> при оплате, могут получить <u>специальную премию от 2% до 3% от цены квартиры</u>. Хотите получить подробный расчет?"
 	case PaymentInstallment:
 		offer = "Бесплатная рассрочка от девелопера гибко подстраивается под ваши запросы, можно выбрать <b>размер первого взноса от 20%</b> и <u>удобную схему платежей – каждый месяц/квартал/полгода</u>. Хотите получить подробный расчет?"
 	case PaymentMortgage:

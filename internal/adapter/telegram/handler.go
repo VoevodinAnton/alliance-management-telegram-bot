@@ -15,8 +15,8 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	chart "github.com/wcharczuk/go-chart/v2"
 
-	"alliance-management-telegram-bot/internal/domain"
-	"alliance-management-telegram-bot/internal/usecase"
+	"zim-gallery-bot/internal/domain"
+	"zim-gallery-bot/internal/usecase"
 )
 
 type Handler struct {
@@ -227,6 +227,16 @@ func (h *Handler) Run() {
 			s := h.getSession(chatID)
 			if s.State == usecase.StateRequestPhone {
 				s.Phone = update.Message.Contact.PhoneNumber
+				// Попробуем собрать имя из Telegram профиля
+				if update.Message.From != nil {
+					name := strings.TrimSpace(strings.TrimSpace(update.Message.From.FirstName + " " + update.Message.From.LastName))
+					if name == "" {
+						name = strings.TrimPrefix(update.Message.From.UserName, "@")
+					}
+					if s != nil {
+						s.Name = name
+					}
+				}
 				h.saveAndSendLead(chatID, s)
 				go func(id int64) {
 					time.Sleep(2 * time.Minute)
@@ -245,6 +255,13 @@ func (h *Handler) Run() {
 					candidate := rawText
 					if looksLikePhone(candidate) {
 						s.Phone = candidate
+						if update.Message.From != nil && strings.TrimSpace(s.Name) == "" {
+							name := strings.TrimSpace(strings.TrimSpace(update.Message.From.FirstName + " " + update.Message.From.LastName))
+							if name == "" {
+								name = strings.TrimPrefix(update.Message.From.UserName, "@")
+							}
+							s.Name = name
+						}
 						h.saveAndSendLead(chatID, s)
 						go func(id int64) {
 							time.Sleep(2 * time.Minute)
@@ -330,7 +347,23 @@ func (h *Handler) Run() {
 			// Телефон есть — подтверждаем и отправляем лид с указанным слотом
 			h.sendText(chatID, fmt.Sprintf("Отлично! Отмечу время %s. Наш адвайзер свяжется с вами завтра в выбранный промежуток.", text))
 			if h.leadDelivery != nil {
-				ld := domain.Lead{ChatID: chatID, Phone: phone, Slot: text, Source: s.PromoTag}
+				// Попробуем определить имя для CRM: из сохранённой сессии или из апдейта Telegram
+				name := strings.TrimSpace(s.Name)
+				if name == "" {
+					if update.Message != nil && update.Message.From != nil {
+						name = strings.TrimSpace(strings.TrimSpace(update.Message.From.FirstName + " " + update.Message.From.LastName))
+						if name == "" {
+							name = strings.TrimPrefix(update.Message.From.UserName, "@")
+						}
+					} else if update.CallbackQuery != nil && update.CallbackQuery.From != nil {
+						from := update.CallbackQuery.From
+						name = strings.TrimSpace(strings.TrimSpace(from.FirstName + " " + from.LastName))
+						if name == "" {
+							name = strings.TrimPrefix(from.UserName, "@")
+						}
+					}
+				}
+				ld := domain.Lead{ChatID: chatID, Phone: phone, Slot: text, Source: s.PromoTag, Name: name}
 				go func(id int64, lead domain.Lead) {
 					if h.logger != nil {
 						h.logger.Info("macrocrm send start", "chat_id", id)
@@ -357,7 +390,6 @@ func (h *Handler) Run() {
 		if strings.HasPrefix(text, "/start") {
 			// 1) Приветствие (HTML)
 			msg := tgbotapi.NewMessage(chatID, reply.Text)
-			msg.ParseMode = tgbotapi.ModeHTML
 			msg.ParseMode = tgbotapi.ModeHTML
 			_, _ = h.bot.Send(msg)
 			// 2) Сообщение с кнопкой "Хочу"
@@ -398,7 +430,7 @@ func (h *Handler) saveAndSendLead(chatID int64, s *usecase.Session) {
 				slot = v
 			}
 		}
-		ld := domain.Lead{ChatID: chatID, Purpose: s.Purpose, Bedrooms: s.Bedrooms, Payment: s.Payment, Phone: s.Phone, Slot: slot, Source: s.PromoTag}
+		ld := domain.Lead{ChatID: chatID, Purpose: s.Purpose, Bedrooms: s.Bedrooms, Payment: s.Payment, Phone: s.Phone, Slot: slot, Source: s.PromoTag, Name: s.Name}
 		if err := h.leadRepo.SaveLead(ld); err != nil {
 			if h.logger != nil {
 				h.logger.Error("lead save failed", "chat_id", chatID, "error", err)

@@ -4,7 +4,7 @@ import (
 	"sync"
 	"time"
 
-	"alliance-management-telegram-bot/internal/usecase"
+	"zim-gallery-bot/internal/usecase"
 )
 
 type BroadcastStatRepo struct {

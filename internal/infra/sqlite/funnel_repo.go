@@ -6,7 +6,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"alliance-management-telegram-bot/internal/usecase"
+	"zim-gallery-bot/internal/usecase"
 )
 
 type FunnelRepo struct {

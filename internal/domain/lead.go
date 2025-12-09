@@ -10,6 +10,7 @@ type Lead struct {
 	Phone     string
 	Slot      string
 	Source    string
+	Name      string
 	CreatedAt time.Time
 }
 
