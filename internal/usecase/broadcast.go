@@ -23,6 +23,7 @@ type BroadcastSender interface {
 	SendText(chatID int64, text string) error
 	SendPhoto(chatID int64, fileID string, caption string) error
 	SendDocument(chatID int64, fileID string, caption string) error
+	SendWithInlineButton(chatID int64, text string, photoFileID string, docFileID string, caption string, buttonText string, buttonDocFileID string) error
 }
 
 type BroadcastStat struct {
@@ -38,11 +39,13 @@ type BroadcastStatRepository interface {
 }
 
 type BroadcastSession struct {
-	State       BroadcastState
-	Text        string
-	PhotoFileID string
-	Caption     string
-	DocFileID   string
+	State           BroadcastState
+	Text            string
+	PhotoFileID     string
+	Caption         string
+	DocFileID       string
+	ButtonText      string
+	ButtonDocFileID string
 }
 
 type BroadcastUsecase struct {
@@ -92,6 +95,23 @@ func (u *BroadcastUsecase) ReceiveDocument(s *BroadcastSession, fileID, caption 
 	if strings.TrimSpace(fileID) == "" {
 		return "Не удалось получить документ. Пришлите файл ещё раз.", nil
 	}
+	// Special case: if caption starts with BUTTON:label then treat this document
+	// as the PDF that will be sent when inline button is clicked.
+	if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(caption)), "BUTTON:") {
+		// parse label after BUTTON:
+		parts := strings.SplitN(caption, ":", 2)
+		label := "Файл"
+		if len(parts) == 2 && strings.TrimSpace(parts[1]) != "" {
+			label = strings.TrimSpace(parts[1])
+		}
+		s.ButtonText = label
+		s.ButtonDocFileID = fileID
+		// keep existing content (text/photo) and stay in confirm state
+		s.State = BStateConfirm
+		return "Кнопка прикреплена к рассылке:", []string{"Отправить", "Отмена"}
+	}
+
+	// otherwise treat document as main content of the broadcast
 	s.DocFileID = fileID
 	s.Caption = caption
 	s.Text = ""
@@ -116,9 +136,13 @@ func (u *BroadcastUsecase) ConfirmSend(s *BroadcastSession, cmd string) (string,
 		return "Не удалось получить список пользователей", err
 	}
 	var sent, failed int
+	var firstErr error
 	for _, id := range ids {
 		var sendErr error
-		if s.PhotoFileID != "" {
+		// If an inline button is set, send content with inline button attached.
+		if s.ButtonText != "" && s.ButtonDocFileID != "" {
+			sendErr = u.Sender.SendWithInlineButton(id, s.Text, s.PhotoFileID, s.DocFileID, s.Caption, s.ButtonText, s.ButtonDocFileID)
+		} else if s.PhotoFileID != "" {
 			sendErr = u.Sender.SendPhoto(id, s.PhotoFileID, s.Caption)
 		} else if s.DocFileID != "" {
 			// caption у документа ограничен; передаём Caption, если есть, иначе Text
@@ -132,6 +156,9 @@ func (u *BroadcastUsecase) ConfirmSend(s *BroadcastSession, cmd string) (string,
 		}
 		if sendErr != nil {
 			failed++
+			if firstErr == nil {
+				firstErr = sendErr
+			}
 			continue
 		}
 		sent++
@@ -141,13 +168,17 @@ func (u *BroadcastUsecase) ConfirmSend(s *BroadcastSession, cmd string) (string,
 	s.PhotoFileID = ""
 	s.Caption = ""
 	_ = u.Stat.Save(BroadcastStat{Total: len(ids), Sent: sent, Failed: failed})
-	return fmt.Sprintf("Рассылка отправлена: %d успешно, %d с ошибками.", sent, failed), nil
+	summary := fmt.Sprintf("Рассылка отправлена: %d успешно, %d с ошибками.", sent, failed)
+	if failed > 0 {
+		return summary, fmt.Errorf("%d failed; sample error: %w", failed, firstErr)
+	}
+	return summary, nil
 }
 
 func (u *BroadcastUsecase) StatsSummary(n int) string {
 	stats, err := u.Stat.ListRecent(n)
 	if err != nil || len(stats) == 0 {
-		return "Статистика недоступна или отсутствует"
+		return "Статистика рассылок недоступна или отсутствует"
 	}
 	var b strings.Builder
 	b.WriteString("Последние рассылки:\n")

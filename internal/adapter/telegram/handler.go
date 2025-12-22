@@ -3,6 +3,8 @@ package telegram
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"os"
@@ -109,6 +111,31 @@ func (h *Handler) Run() {
 		} else if update.CallbackQuery != nil {
 			chatID = update.CallbackQuery.Message.Chat.ID
 			text = update.CallbackQuery.Data
+			// handle inline button for PDF: callback data format BPDF:<token>
+			if strings.HasPrefix(text, "BPDF:") {
+				token := strings.TrimPrefix(text, "BPDF:")
+				// lookup real file_id from Sender's registry
+				if sender, ok := h.broadcastUC.Sender.(*Sender); ok {
+					if fileID, ok2 := sender.LookupButton(token); ok2 {
+						// answer callback to remove loading indicator
+						cb := tgbotapi.NewCallback(update.CallbackQuery.ID, "Отправляю файл")
+						_, _ = h.bot.Request(cb)
+						// Send the PDF to the user who clicked (From.ID)
+						to := update.CallbackQuery.From.ID
+						doc := tgbotapi.NewDocument(to, tgbotapi.FileID(fileID))
+						if _, err := h.bot.Send(doc); err != nil {
+							if h.logger != nil {
+								h.logger.Error("send button pdf failed", "chat_id", to, "error", err)
+							}
+						}
+						continue
+					}
+				}
+				// token not found — answer callback with message
+				cb := tgbotapi.NewCallback(update.CallbackQuery.ID, "Файл недоступен")
+				_, _ = h.bot.Request(cb)
+				continue
+			}
 		}
 		// сохраняем только не-админов; перед этим узнаем, был ли пользователь ранее
 		knownUser := false
@@ -130,7 +157,7 @@ func (h *Handler) Run() {
 				continue
 			}
 			msg := tgbotapi.NewMessage(chatID, "Админ-меню")
-			msg.ReplyMarkup = inlineKeyboard([]string{"Создать рассылку", "Статистика", "Воронка", "DAU"})
+			msg.ReplyMarkup = inlineKeyboard([]string{"Создать рассылку", "Статистика рассылок", "Воронка", "DAU"})
 			_, _ = h.bot.Send(msg)
 			if h.logger != nil {
 				h.logger.Info("admin opened menu", "chat_id", chatID)
@@ -147,7 +174,7 @@ func (h *Handler) Run() {
 				}
 				continue
 			}
-			if text == "Статистика" {
+			if text == "Статистика рассылок" {
 				h.sendText(chatID, h.broadcastUC.StatsSummary(5))
 				continue
 			}
@@ -212,10 +239,16 @@ func (h *Handler) Run() {
 					// пустой текст — игнорируем, ждём контент
 					continue
 				case usecase.BStateConfirm:
-					msg, _ := h.broadcastUC.ConfirmSend(s, text)
+					msg, err := h.broadcastUC.ConfirmSend(s, text)
 					h.sendTextRemoveKeyboard(chatID, msg)
-					if h.logger != nil {
-						h.logger.Info("broadcast confirm", "chat_id", chatID)
+					if err != nil {
+						if h.logger != nil {
+							h.logger.Error("broadcast send errors", "chat_id", chatID, "error", err)
+						}
+					} else {
+						if h.logger != nil {
+							h.logger.Info("broadcast confirm", "chat_id", chatID)
+						}
 					}
 					continue
 				}
@@ -659,9 +692,15 @@ func looksLikePhone(s string) bool {
 }
 
 // Реализация отправителя для юзкейсов
-type Sender struct{ bot *tgbotapi.BotAPI }
+type Sender struct {
+	bot       *tgbotapi.BotAPI
+	mu        sync.RWMutex
+	buttonMap map[string]string
+}
 
-func NewSender(bot *tgbotapi.BotAPI) *Sender { return &Sender{bot: bot} }
+func NewSender(bot *tgbotapi.BotAPI) *Sender {
+	return &Sender{bot: bot, buttonMap: make(map[string]string)}
+}
 
 func (s *Sender) SendText(chatID int64, text string) error {
 	msg := tgbotapi.NewMessage(chatID, text)
@@ -684,15 +723,82 @@ func (s *Sender) SendDocument(chatID int64, fileID string, caption string) error
 	return err
 }
 
+func (s *Sender) SendWithInlineButton(chatID int64, text string, photoFileID string, docFileID string, caption string, buttonText string, buttonDocFileID string) error {
+	// Register short token for the button PDF and use token in callback data
+	token := s.RegisterButton(buttonDocFileID)
+	btn := tgbotapi.NewInlineKeyboardButtonData(buttonText, "BPDF:"+token)
+	kb := tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(btn))
+
+	if strings.TrimSpace(photoFileID) != "" {
+		photo := tgbotapi.NewPhoto(chatID, tgbotapi.FileID(photoFileID))
+		photo.Caption = caption
+		photo.ReplyMarkup = kb
+		_, err := s.bot.Send(photo)
+		return err
+	}
+	if strings.TrimSpace(docFileID) != "" {
+		doc := tgbotapi.NewDocument(chatID, tgbotapi.FileID(docFileID))
+		doc.Caption = caption
+		doc.ReplyMarkup = kb
+		_, err := s.bot.Send(doc)
+		return err
+	}
+	msg := tgbotapi.NewMessage(chatID, text)
+	msg.ReplyMarkup = kb
+	msg.ParseMode = tgbotapi.ModeHTML
+	_, err := s.bot.Send(msg)
+	return err
+}
+
+// internal registry for short tokens -> file_id
+func (s *Sender) RegisterButton(fileID string) string {
+	if strings.TrimSpace(fileID) == "" {
+		return ""
+	}
+	// generate 8-byte random token hex
+	b := make([]byte, 8)
+	if _, err := rand.Read(b); err != nil {
+		// fallback to timestamp-based token
+		return strconv.FormatInt(time.Now().UnixNano(), 36)
+	}
+	token := hex.EncodeToString(b)
+	s.mu.Lock()
+	if s.buttonMap == nil {
+		s.buttonMap = make(map[string]string)
+	}
+	s.buttonMap[token] = fileID
+	s.mu.Unlock()
+	return token
+}
+
+func (s *Sender) LookupButton(token string) (string, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.buttonMap == nil {
+		return "", false
+	}
+	v, ok := s.buttonMap[token]
+	return v, ok
+}
+
 func (h *Handler) sendFunnelChart(chatID int64, labels []string, values []int) error {
 	bars := make([]chart.Value, 0, len(labels))
 	maxVal := 0
 	for i := range labels {
 		v := values[i]
+		if v == 0 {
+			continue
+		}
 		if v > maxVal {
 			maxVal = v
 		}
 		bars = append(bars, chart.Value{Value: float64(v), Label: labels[i]})
+	}
+	// если все значения нулевые, показывать обычный график из нулей
+	if len(bars) == 0 {
+		for i := range labels {
+			bars = append(bars, chart.Value{Value: float64(values[i]), Label: labels[i]})
+		}
 	}
 	// Избежать ошибки invalid data range при нулевых значениях
 	yMax := float64(maxVal)
@@ -709,8 +815,11 @@ func (h *Handler) sendFunnelChart(chatID int64, labels []string, values []int) e
 			Right:  16,
 			Bottom: 0,
 		}},
-		YAxis: chart.YAxis{Range: &chart.ContinuousRange{Min: 0, Max: yMax}},
-		Bars:  bars,
+		YAxis: chart.YAxis{
+			Range:          &chart.ContinuousRange{Min: 0, Max: yMax},
+			ValueFormatter: chart.IntValueFormatter,
+		},
+		Bars: bars,
 	}
 	buf := bytes.NewBuffer(nil)
 	if err := graph.Render(chart.PNG, buf); err != nil {
