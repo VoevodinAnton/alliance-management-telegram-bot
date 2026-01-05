@@ -439,7 +439,9 @@ func (h *Handler) Run() {
 			msg.ReplyMarkup = kb
 			_, _ = h.bot.Send(msg)
 			// Сразу приложим релевантный каталог (асинхронно с кэшем file_id)
-			h.sendCatalogPDF(chatID, s)
+			if h.catalogsEnabled() {
+				h.sendCatalogPDF(chatID, s)
+			}
 			h.trackFunnel(chatID, s.State)
 			continue
 		}
@@ -520,6 +522,12 @@ func (h *Handler) getBSession(chatID int64) *usecase.BroadcastSession {
 	return s
 }
 
+// catalogsEnabled returns true when catalog PDF sending is enabled via
+// the CONTEXT7 environment flag. By default catalogs are disabled.
+func (h *Handler) catalogsEnabled() bool {
+	return os.Getenv("sendCatalogPDF") == "1"
+}
+
 func (h *Handler) applyReply(chatID int64, r usecase.Reply) {
 	if r.RemoveKeyboard {
 		msg := tgbotapi.NewMessage(chatID, r.Text)
@@ -528,7 +536,9 @@ func (h *Handler) applyReply(chatID int64, r usecase.Reply) {
 		_, _ = h.bot.Send(msg)
 		// Попробуем отправить релевантный PDF каталог
 		s := h.getSession(chatID)
-		h.sendCatalogPDF(chatID, s)
+		if h.catalogsEnabled() {
+			h.sendCatalogPDF(chatID, s)
+		}
 		return
 	}
 	if len(r.Options) > 0 {
@@ -536,7 +546,9 @@ func (h *Handler) applyReply(chatID int64, r usecase.Reply) {
 		// Если следующий шаг — запрос телефона, всё равно приложим каталог прямо сейчас
 		if r.AdvanceTo == usecase.StateRequestPhone {
 			s := h.getSession(chatID)
-			h.sendCatalogPDF(chatID, s)
+			if h.catalogsEnabled() {
+				h.sendCatalogPDF(chatID, s)
+			}
 		}
 		return
 	}
