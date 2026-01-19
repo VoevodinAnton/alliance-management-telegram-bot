@@ -708,10 +708,11 @@ type Sender struct {
 	bot       *tgbotapi.BotAPI
 	mu        sync.RWMutex
 	buttonMap map[string]string
+	store     TokenStore
 }
 
-func NewSender(bot *tgbotapi.BotAPI) *Sender {
-	return &Sender{bot: bot, buttonMap: make(map[string]string)}
+func NewSender(bot *tgbotapi.BotAPI, store TokenStore) *Sender {
+	return &Sender{bot: bot, buttonMap: make(map[string]string), store: store}
 }
 
 func (s *Sender) SendText(chatID int64, text string) error {
@@ -738,6 +739,9 @@ func (s *Sender) SendDocument(chatID int64, fileID string, caption string) error
 func (s *Sender) SendWithInlineButton(chatID int64, text string, photoFileID string, docFileID string, caption string, buttonText string, buttonDocFileID string) error {
 	// Register short token for the button PDF and use token in callback data
 	token := s.RegisterButton(buttonDocFileID)
+	if strings.TrimSpace(token) == "" {
+		return fmt.Errorf("button file id empty")
+	}
 	btn := tgbotapi.NewInlineKeyboardButtonData(buttonText, "BPDF:"+token)
 	kb := tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(btn))
 
@@ -780,17 +784,52 @@ func (s *Sender) RegisterButton(fileID string) string {
 	}
 	s.buttonMap[token] = fileID
 	s.mu.Unlock()
+	// persist mapping if store provided
+	if s.store != nil {
+		if err := s.store.SaveToken(token, fileID); err != nil {
+			slog.Default().Warn("persist token failed", "token", token, "error", err)
+		}
+	}
+	// log registration for debugging (uses global default logger)
+	slog.Default().Info("registered button token", "token", token, "file_id", fileID)
 	return token
 }
 
 func (s *Sender) LookupButton(token string) (string, bool) {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if s.buttonMap == nil {
-		return "", false
+	if s.buttonMap != nil {
+		if v, ok := s.buttonMap[token]; ok {
+			s.mu.RUnlock()
+			return v, true
+		}
 	}
-	v, ok := s.buttonMap[token]
-	return v, ok
+	s.mu.RUnlock()
+	// fallback to persistent store
+	if s.store != nil {
+		fileID, ok, err := s.store.LookupToken(token)
+		if err != nil {
+			slog.Default().Warn("token lookup error", "token", token, "error", err)
+			return "", false
+		}
+		if ok {
+			// cache in memory
+			s.mu.Lock()
+			if s.buttonMap == nil {
+				s.buttonMap = make(map[string]string)
+			}
+			s.buttonMap[token] = fileID
+			s.mu.Unlock()
+			return fileID, true
+		}
+	}
+	slog.Default().Warn("button lookup failed", "token", token)
+	return "", false
+}
+
+// TokenStore is an optional persistence interface for token->file_id mapping
+type TokenStore interface {
+	SaveToken(token, fileID string) error
+	LookupToken(token string) (string, bool, error)
 }
 
 func (h *Handler) sendFunnelChart(chatID int64, labels []string, values []int) error {

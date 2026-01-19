@@ -84,7 +84,13 @@ func main() {
 		os.Exit(1)
 	}
 	dialog := usecase.NewDialog()
-	sender := telegramAdapter.NewSender(bot)
+	// token repo for persistent inline-button tokens
+	tokenRepo, err := sqliteRepo.NewTokenRepo(dsn)
+	if err != nil {
+		logger.Error("token sqlite init error", "error", err)
+		os.Exit(1)
+	}
+	sender := telegramAdapter.NewSender(bot, tokenRepo)
 	statRepo, err := sqliteRepo.NewBroadcastStatRepo(dsn)
 	if err != nil {
 		logger.Error("broadcast stat sqlite init error", "error", err)
