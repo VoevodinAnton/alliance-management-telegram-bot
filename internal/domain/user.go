@@ -12,5 +12,5 @@ type UserRepository interface {
 
 // Abstraction for sending messages (implemented by Telegram adapter)
 type MessageSender interface {
-	SendText(chatID int64, text string) error
+	SendText(chatID int64, text string, parseMode string) error
 }

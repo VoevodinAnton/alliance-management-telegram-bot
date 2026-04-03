@@ -12,6 +12,7 @@ services:
       - LEADS_SQLITE_DSN=/data/leads.db
       - LOG_CHAT_ID=${LOG_CHAT_ID}
       - LOG_BOT_TOKEN=${LOG_BOT_TOKEN}
+      - sendCatalogPDF=1
     volumes:
       - ./data:/data
       - ./collections:/app/collections:ro

@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"html"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf16"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	chart "github.com/wcharczuk/go-chart/v2"
@@ -216,23 +218,37 @@ func (h *Handler) Run() {
 				if m := update.Message; m != nil && len(m.Photo) > 0 {
 					ph := m.Photo[len(m.Photo)-1]
 					fileID := ph.FileID
-					caption := m.Caption
+					caption := formatHTMLWithEntities(m.Caption, m.CaptionEntities)
 					msg, opts := h.broadcastUC.ReceivePhoto(s, fileID, caption)
 					h.sendTextWithKeyboard(chatID, msg, opts)
 					continue
 				}
 				if m := update.Message; m != nil && m.Document != nil {
 					fileID := m.Document.FileID
-					caption := m.Caption
+					caption := formatHTMLWithEntities(m.Caption, m.CaptionEntities)
 					msg, opts := h.broadcastUC.ReceiveDocument(s, fileID, caption)
 					h.sendTextWithKeyboard(chatID, msg, opts)
 					continue
+				}
+				if s.State == usecase.BStateConfirm && strings.TrimSpace(text) != "" {
+					handled, msg, opts, err := h.broadcastUC.TryAttachButtonLink(s, text)
+					if handled {
+						h.sendTextWithKeyboard(chatID, msg, opts)
+						if err != nil && h.logger != nil {
+							h.logger.Warn("broadcast button link rejected", "chat_id", chatID, "error", err)
+						}
+						continue
+					}
 				}
 				switch s.State {
 				case usecase.BStateEnter:
 					// Принимаем текст только если он не пустой; иначе ждём фото/документ
 					if strings.TrimSpace(text) != "" {
-						msg, opts, _ := h.broadcastUC.ReceiveText(s, text)
+						formattedText := text
+						if update.Message != nil {
+							formattedText = formatHTMLWithEntities(update.Message.Text, update.Message.Entities)
+						}
+						msg, opts, _ := h.broadcastUC.ReceiveText(s, formattedText)
 						h.sendTextWithKeyboard(chatID, msg, opts)
 						continue
 					}
@@ -419,17 +435,6 @@ func (h *Handler) Run() {
 			continue
 		}
 		reply := h.dialog.Handle(s, text)
-		// Спец-логика для /start: отправить приветствие и сразу второе сообщение с кнопкой "Хочу"
-		if strings.HasPrefix(text, "/start") {
-			// 1) Приветствие (HTML)
-			msg := tgbotapi.NewMessage(chatID, reply.Text)
-			msg.ParseMode = tgbotapi.ModeHTML
-			_, _ = h.bot.Send(msg)
-			// 2) Сообщение с кнопкой "Хочу"
-			h.sendTextWithKeyboard(chatID, "Несколько уточняющих вопросов, и мы отправим вам подходящее предложение уже через пару минут.", []string{usecase.StartBtn})
-			h.trackFunnel(chatID, s.State)
-			continue
-		}
 		if s.State == usecase.StateRequestPhone {
 			btn := tgbotapi.NewKeyboardButtonContact("Отправить номер")
 			kb := tgbotapi.NewReplyKeyboard(tgbotapi.NewKeyboardButtonRow(btn))
@@ -438,10 +443,6 @@ func (h *Handler) Run() {
 			msg.ParseMode = tgbotapi.ModeHTML
 			msg.ReplyMarkup = kb
 			_, _ = h.bot.Send(msg)
-			// Сразу приложим релевантный каталог (асинхронно с кэшем file_id)
-			if h.catalogsEnabled() {
-				h.sendCatalogPDF(chatID, s)
-			}
 			h.trackFunnel(chatID, s.State)
 			continue
 		}
@@ -493,7 +494,10 @@ func (h *Handler) saveAndSendLead(chatID int64, s *usecase.Session) {
 		}
 	}
 	h.trackFunnel(chatID, usecase.StateLeadSaved)
-	h.sendTextRemoveKeyboard(chatID, "Спасибо! Мы получили ваш номер. Наш эксперт свяжется с вами в ближайшее время.")
+	h.sendTextRemoveKeyboard(chatID, "Спасибо! Мы получили номер.\n В ближайшее время с вами свяжется адвайзер и предложит персональные условия по вашим параметрам.")
+	if h.catalogsEnabled() {
+		h.sendCatalogPDF(chatID, s)
+	}
 }
 
 func (h *Handler) isAdmin(chatID int64) bool {
@@ -534,22 +538,10 @@ func (h *Handler) applyReply(chatID int64, r usecase.Reply) {
 		msg.ParseMode = tgbotapi.ModeHTML
 		msg.ReplyMarkup = tgbotapi.NewRemoveKeyboard(true)
 		_, _ = h.bot.Send(msg)
-		// Попробуем отправить релевантный PDF каталог
-		s := h.getSession(chatID)
-		if h.catalogsEnabled() {
-			h.sendCatalogPDF(chatID, s)
-		}
 		return
 	}
 	if len(r.Options) > 0 {
 		h.sendTextWithKeyboard(chatID, r.Text, r.Options)
-		// Если следующий шаг — запрос телефона, всё равно приложим каталог прямо сейчас
-		if r.AdvanceTo == usecase.StateRequestPhone {
-			s := h.getSession(chatID)
-			if h.catalogsEnabled() {
-				h.sendCatalogPDF(chatID, s)
-			}
-		}
 		return
 	}
 	// Финального шага выбора канала больше нет
@@ -557,7 +549,14 @@ func (h *Handler) applyReply(chatID int64, r usecase.Reply) {
 }
 
 // sendCatalogPDF отправляет документ из папки collections согласно текущему выбору пользователя
+// NOTE: catalogs are sent only after the user provided a phone number in the session.
 func (h *Handler) sendCatalogPDF(chatID int64, s *usecase.Session) {
+	if s == nil {
+		return
+	}
+	if strings.TrimSpace(s.Phone) == "" {
+		return
+	}
 	filePath := usecase.CatalogFileFor(s)
 	if strings.TrimSpace(filePath) == "" {
 		return
@@ -650,6 +649,7 @@ func (h *Handler) sendCatalogPDF(chatID int64, s *usecase.Session) {
 
 func (h *Handler) sendText(chatID int64, text string) {
 	msg := tgbotapi.NewMessage(chatID, text)
+	msg.ParseMode = tgbotapi.ModeHTML
 	_, _ = h.bot.Send(msg)
 }
 
@@ -664,6 +664,7 @@ func (h *Handler) sendTextWithKeyboard(chatID int64, text string, opts []string)
 
 func (h *Handler) sendTextRemoveKeyboard(chatID int64, text string) {
 	msg := tgbotapi.NewMessage(chatID, text)
+	msg.ParseMode = tgbotapi.ModeHTML
 	msg.ReplyMarkup = tgbotapi.NewRemoveKeyboard(true)
 	_, _ = h.bot.Send(msg)
 }
@@ -703,6 +704,102 @@ func looksLikePhone(s string) bool {
 	return false
 }
 
+// formatHTMLWithEntities converts Telegram entities to HTML markup so formatting is preserved on broadcast.
+// Offsets/lengths from Telegram are in UTF-16 code units, so we map them back to rune indexes before applying tags.
+func formatHTMLWithEntities(text string, entities []tgbotapi.MessageEntity) string {
+	if strings.TrimSpace(text) == "" {
+		return text
+	}
+	if len(entities) == 0 {
+		return text
+	}
+
+	startTags := make(map[int][]string)
+	endTags := make(map[int][]string)
+
+	for _, e := range entities {
+		start := utf16IndexToRuneIndex(text, e.Offset)
+		end := utf16IndexToRuneIndex(text, e.Offset+e.Length)
+		if start < 0 || end < start {
+			continue
+		}
+		open, close := tagsForEntity(e)
+		if open == "" && close == "" {
+			continue
+		}
+		startTags[start] = append(startTags[start], open)
+		endTags[end] = append(endTags[end], close)
+	}
+
+	runes := []rune(text)
+	var b strings.Builder
+	for i := 0; i <= len(runes); i++ {
+		if closes := endTags[i]; len(closes) > 0 {
+			for j := len(closes) - 1; j >= 0; j-- {
+				b.WriteString(closes[j])
+			}
+		}
+		if opens := startTags[i]; len(opens) > 0 {
+			for _, tag := range opens {
+				b.WriteString(tag)
+			}
+		}
+		if i < len(runes) {
+			// Escape plain text to avoid breaking the HTML we add around entities.
+			b.WriteString(html.EscapeString(string(runes[i])))
+		}
+	}
+	return b.String()
+}
+
+func tagsForEntity(e tgbotapi.MessageEntity) (string, string) {
+	switch strings.ToLower(e.Type) {
+	case "bold":
+		return "<b>", "</b>"
+	case "italic":
+		return "<i>", "</i>"
+	case "underline":
+		return "<u>", "</u>"
+	case "strikethrough":
+		return "<s>", "</s>"
+	case "code":
+		return "<code>", "</code>"
+	case "pre":
+		return "<pre>", "</pre>"
+	case "spoiler":
+		return "<tg-spoiler>", "</tg-spoiler>"
+	case "text_link":
+		if strings.TrimSpace(e.URL) == "" {
+			return "", ""
+		}
+		return `<a href="` + html.EscapeString(e.URL) + `">`, "</a>"
+	case "text_mention":
+		if e.User == nil {
+			return "", ""
+		}
+		return fmt.Sprintf(`<a href="tg://user?id=%d">`, e.User.ID), "</a>"
+	default:
+		return "", ""
+	}
+}
+
+// utf16IndexToRuneIndex converts a UTF-16 code-unit offset to a rune index in the given string.
+func utf16IndexToRuneIndex(text string, utf16Index int) int {
+	if utf16Index <= 0 {
+		return 0
+	}
+	runeIndex := 0
+	count := 0
+	for _, r := range text {
+		if count >= utf16Index {
+			break
+		}
+		count += len(utf16.Encode([]rune{r}))
+		runeIndex++
+	}
+	return runeIndex
+}
+
 // Реализация отправителя для юзкейсов
 type Sender struct {
 	bot       *tgbotapi.BotAPI
@@ -715,39 +812,59 @@ func NewSender(bot *tgbotapi.BotAPI, store TokenStore) *Sender {
 	return &Sender{bot: bot, buttonMap: make(map[string]string), store: store}
 }
 
-func (s *Sender) SendText(chatID int64, text string) error {
+func (s *Sender) SendText(chatID int64, text string, parseMode string) error {
 	msg := tgbotapi.NewMessage(chatID, text)
-	msg.ParseMode = tgbotapi.ModeHTML
+	if strings.TrimSpace(parseMode) != "" {
+		msg.ParseMode = parseMode
+	} else {
+		msg.ParseMode = tgbotapi.ModeHTML
+	}
 	_, err := s.bot.Send(msg)
 	return err
 }
 
-func (s *Sender) SendPhoto(chatID int64, fileID string, caption string) error {
+func (s *Sender) SendPhoto(chatID int64, fileID string, caption string, parseMode string) error {
 	photo := tgbotapi.NewPhoto(chatID, tgbotapi.FileID(fileID))
 	photo.Caption = caption
+	if strings.TrimSpace(parseMode) != "" {
+		photo.ParseMode = parseMode
+	}
 	_, err := s.bot.Send(photo)
 	return err
 }
 
-func (s *Sender) SendDocument(chatID int64, fileID string, caption string) error {
+func (s *Sender) SendDocument(chatID int64, fileID string, caption string, parseMode string) error {
 	doc := tgbotapi.NewDocument(chatID, tgbotapi.FileID(fileID))
 	doc.Caption = caption
+	if strings.TrimSpace(parseMode) != "" {
+		doc.ParseMode = parseMode
+	}
 	_, err := s.bot.Send(doc)
 	return err
 }
 
-func (s *Sender) SendWithInlineButton(chatID int64, text string, photoFileID string, docFileID string, caption string, buttonText string, buttonDocFileID string) error {
-	// Register short token for the button PDF and use token in callback data
-	token := s.RegisterButton(buttonDocFileID)
-	if strings.TrimSpace(token) == "" {
-		return fmt.Errorf("button file id empty")
+func (s *Sender) SendWithInlineButton(chatID int64, text string, photoFileID string, docFileID string, caption string, parseMode string, buttonText string, buttonDocFileID string, buttonURL string) error {
+	var btn tgbotapi.InlineKeyboardButton
+	if strings.TrimSpace(buttonDocFileID) != "" {
+		// Register short token for the button PDF and use token in callback data
+		token := s.RegisterButton(buttonDocFileID)
+		if strings.TrimSpace(token) == "" {
+			return fmt.Errorf("button file id empty")
+		}
+		btn = tgbotapi.NewInlineKeyboardButtonData(buttonText, "BPDF:"+token)
+	} else if strings.TrimSpace(buttonURL) != "" {
+		btn = tgbotapi.NewInlineKeyboardButtonURL(buttonText, buttonURL)
+	} else {
+		return fmt.Errorf("button target empty")
 	}
-	btn := tgbotapi.NewInlineKeyboardButtonData(buttonText, "BPDF:"+token)
 	kb := tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(btn))
 
 	if strings.TrimSpace(photoFileID) != "" {
 		photo := tgbotapi.NewPhoto(chatID, tgbotapi.FileID(photoFileID))
 		photo.Caption = caption
+		if strings.TrimSpace(parseMode) != "" {
+			photo.ParseMode = parseMode
+		}
 		photo.ReplyMarkup = kb
 		_, err := s.bot.Send(photo)
 		return err
@@ -755,13 +872,20 @@ func (s *Sender) SendWithInlineButton(chatID int64, text string, photoFileID str
 	if strings.TrimSpace(docFileID) != "" {
 		doc := tgbotapi.NewDocument(chatID, tgbotapi.FileID(docFileID))
 		doc.Caption = caption
+		if strings.TrimSpace(parseMode) != "" {
+			doc.ParseMode = parseMode
+		}
 		doc.ReplyMarkup = kb
 		_, err := s.bot.Send(doc)
 		return err
 	}
 	msg := tgbotapi.NewMessage(chatID, text)
 	msg.ReplyMarkup = kb
-	msg.ParseMode = tgbotapi.ModeHTML
+	if strings.TrimSpace(parseMode) != "" {
+		msg.ParseMode = parseMode
+	} else {
+		msg.ParseMode = tgbotapi.ModeHTML
+	}
 	_, err := s.bot.Send(msg)
 	return err
 }
