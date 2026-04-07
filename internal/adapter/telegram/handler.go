@@ -159,7 +159,7 @@ func (h *Handler) Run() {
 				continue
 			}
 			msg := tgbotapi.NewMessage(chatID, "Админ-меню")
-			msg.ReplyMarkup = inlineKeyboard([]string{"Создать рассылку", "Статистика рассылок", "Воронка", "DAU"})
+			msg.ReplyMarkup = inlineKeyboard([]string{"Создать рассылку", "Удалить последнюю рассылку", "Статистика рассылок", "Воронка", "DAU"})
 			_, _ = h.bot.Send(msg)
 			if h.logger != nil {
 				h.logger.Info("admin opened menu", "chat_id", chatID)
@@ -178,6 +178,14 @@ func (h *Handler) Run() {
 			}
 			if text == "Статистика рассылок" {
 				h.sendText(chatID, h.broadcastUC.StatsSummary(5))
+				continue
+			}
+			if text == "Удалить последнюю рассылку" {
+				msg, err := h.broadcastUC.DeleteLastBroadcast()
+				h.sendText(chatID, msg)
+				if err != nil && h.logger != nil {
+					h.logger.Error("broadcast delete errors", "chat_id", chatID, "error", err)
+				}
 				continue
 			}
 			if text == "Воронка" {
@@ -812,50 +820,59 @@ func NewSender(bot *tgbotapi.BotAPI, store TokenStore) *Sender {
 	return &Sender{bot: bot, buttonMap: make(map[string]string), store: store}
 }
 
-func (s *Sender) SendText(chatID int64, text string, parseMode string) error {
+func (s *Sender) SendText(chatID int64, text string, parseMode string) (int, error) {
 	msg := tgbotapi.NewMessage(chatID, text)
 	if strings.TrimSpace(parseMode) != "" {
 		msg.ParseMode = parseMode
 	} else {
 		msg.ParseMode = tgbotapi.ModeHTML
 	}
-	_, err := s.bot.Send(msg)
-	return err
+	sent, err := s.bot.Send(msg)
+	if err != nil {
+		return 0, err
+	}
+	return sent.MessageID, nil
 }
 
-func (s *Sender) SendPhoto(chatID int64, fileID string, caption string, parseMode string) error {
+func (s *Sender) SendPhoto(chatID int64, fileID string, caption string, parseMode string) (int, error) {
 	photo := tgbotapi.NewPhoto(chatID, tgbotapi.FileID(fileID))
 	photo.Caption = caption
 	if strings.TrimSpace(parseMode) != "" {
 		photo.ParseMode = parseMode
 	}
-	_, err := s.bot.Send(photo)
-	return err
+	sent, err := s.bot.Send(photo)
+	if err != nil {
+		return 0, err
+	}
+	return sent.MessageID, nil
 }
 
-func (s *Sender) SendDocument(chatID int64, fileID string, caption string, parseMode string) error {
+func (s *Sender) SendDocument(chatID int64, fileID string, caption string, parseMode string) (int, error) {
 	doc := tgbotapi.NewDocument(chatID, tgbotapi.FileID(fileID))
 	doc.Caption = caption
 	if strings.TrimSpace(parseMode) != "" {
 		doc.ParseMode = parseMode
 	}
-	_, err := s.bot.Send(doc)
-	return err
+	sent, err := s.bot.Send(doc)
+	if err != nil {
+		return 0, err
+	}
+	return sent.MessageID, nil
 }
 
-func (s *Sender) SendWithInlineButton(chatID int64, text string, photoFileID string, docFileID string, caption string, parseMode string, buttonText string, buttonDocFileID string, buttonURL string) error {
+func (s *Sender) SendWithInlineButton(chatID int64, text string, photoFileID string, docFileID string, caption string, parseMode string, buttonText string, buttonDocFileID string, buttonURL string) (int, error) {
 	var btn tgbotapi.InlineKeyboardButton
 	if strings.TrimSpace(buttonDocFileID) != "" {
 		// Register short token for the button PDF and use token in callback data
 		token := s.RegisterButton(buttonDocFileID)
 		if strings.TrimSpace(token) == "" {
-			return fmt.Errorf("button file id empty")
+			return 0, fmt.Errorf("button file id empty")
 		}
 		btn = tgbotapi.NewInlineKeyboardButtonData(buttonText, "BPDF:"+token)
 	} else if strings.TrimSpace(buttonURL) != "" {
 		btn = tgbotapi.NewInlineKeyboardButtonURL(buttonText, buttonURL)
 	} else {
-		return fmt.Errorf("button target empty")
+		return 0, fmt.Errorf("button target empty")
 	}
 	kb := tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(btn))
 
@@ -866,8 +883,11 @@ func (s *Sender) SendWithInlineButton(chatID int64, text string, photoFileID str
 			photo.ParseMode = parseMode
 		}
 		photo.ReplyMarkup = kb
-		_, err := s.bot.Send(photo)
-		return err
+		sent, err := s.bot.Send(photo)
+		if err != nil {
+			return 0, err
+		}
+		return sent.MessageID, nil
 	}
 	if strings.TrimSpace(docFileID) != "" {
 		doc := tgbotapi.NewDocument(chatID, tgbotapi.FileID(docFileID))
@@ -876,8 +896,11 @@ func (s *Sender) SendWithInlineButton(chatID int64, text string, photoFileID str
 			doc.ParseMode = parseMode
 		}
 		doc.ReplyMarkup = kb
-		_, err := s.bot.Send(doc)
-		return err
+		sent, err := s.bot.Send(doc)
+		if err != nil {
+			return 0, err
+		}
+		return sent.MessageID, nil
 	}
 	msg := tgbotapi.NewMessage(chatID, text)
 	msg.ReplyMarkup = kb
@@ -886,7 +909,16 @@ func (s *Sender) SendWithInlineButton(chatID int64, text string, photoFileID str
 	} else {
 		msg.ParseMode = tgbotapi.ModeHTML
 	}
-	_, err := s.bot.Send(msg)
+	sent, err := s.bot.Send(msg)
+	if err != nil {
+		return 0, err
+	}
+	return sent.MessageID, nil
+}
+
+func (s *Sender) DeleteMessage(chatID int64, messageID int) error {
+	cfg := tgbotapi.DeleteMessageConfig{ChatID: chatID, MessageID: messageID}
+	_, err := s.bot.Request(cfg)
 	return err
 }
 

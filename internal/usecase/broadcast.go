@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -21,10 +22,11 @@ type BroadcastRepository interface {
 }
 
 type BroadcastSender interface {
-	SendText(chatID int64, text string, parseMode string) error
-	SendPhoto(chatID int64, fileID string, caption string, parseMode string) error
-	SendDocument(chatID int64, fileID string, caption string, parseMode string) error
-	SendWithInlineButton(chatID int64, text string, photoFileID string, docFileID string, caption string, parseMode string, buttonText string, buttonDocFileID string, buttonURL string) error
+	SendText(chatID int64, text string, parseMode string) (int, error)
+	SendPhoto(chatID int64, fileID string, caption string, parseMode string) (int, error)
+	SendDocument(chatID int64, fileID string, caption string, parseMode string) (int, error)
+	SendWithInlineButton(chatID int64, text string, photoFileID string, docFileID string, caption string, parseMode string, buttonText string, buttonDocFileID string, buttonURL string) (int, error)
+	DeleteMessage(chatID int64, messageID int) error
 }
 
 type BroadcastStat struct {
@@ -37,6 +39,19 @@ type BroadcastStat struct {
 type BroadcastStatRepository interface {
 	Save(stat BroadcastStat) error
 	ListRecent(n int) ([]BroadcastStat, error)
+}
+
+type BroadcastDelivery struct {
+	BroadcastKey string
+	ChatID       int64
+	MessageID    int
+	CreatedAt    time.Time
+}
+
+type BroadcastDeliveryRepository interface {
+	Save(delivery BroadcastDelivery) error
+	ListLastBroadcast() ([]BroadcastDelivery, error)
+	MarkBroadcastDeleted(broadcastKey string, deletedAt time.Time) error
 }
 
 type BroadcastSession struct {
@@ -53,13 +68,14 @@ type BroadcastSession struct {
 }
 
 type BroadcastUsecase struct {
-	Repo   BroadcastRepository
-	Sender BroadcastSender
-	Stat   BroadcastStatRepository
+	Repo     BroadcastRepository
+	Sender   BroadcastSender
+	Stat     BroadcastStatRepository
+	Delivery BroadcastDeliveryRepository
 }
 
-func NewBroadcastUsecase(repo BroadcastRepository, sender BroadcastSender, stat BroadcastStatRepository) *BroadcastUsecase {
-	return &BroadcastUsecase{Repo: repo, Sender: sender, Stat: stat}
+func NewBroadcastUsecase(repo BroadcastRepository, sender BroadcastSender, stat BroadcastStatRepository, delivery BroadcastDeliveryRepository) *BroadcastUsecase {
+	return &BroadcastUsecase{Repo: repo, Sender: sender, Stat: stat, Delivery: delivery}
 }
 
 func (u *BroadcastUsecase) Start(s *BroadcastSession) string {
@@ -199,26 +215,32 @@ func (u *BroadcastUsecase) ConfirmSend(s *BroadcastSession, cmd string) (string,
 	}
 	var sent, failed int
 	var firstErr error
+	broadcastKey := strconv.FormatInt(time.Now().UnixNano(), 36)
+	var trackingFailed bool
+	var firstTrackingErr error
 	for _, id := range ids {
-		var sendErr error
+		var (
+			sendErr   error
+			messageID int
+		)
 		// If an inline button is set, send content with inline button attached.
 		if s.ButtonText != "" && (s.ButtonDocFileID != "" || s.ButtonURL != "") {
 			parseMode := s.TextParseMode
 			if s.PhotoFileID != "" || s.DocFileID != "" {
 				parseMode = s.CaptionParseMode
 			}
-			sendErr = u.Sender.SendWithInlineButton(id, s.Text, s.PhotoFileID, s.DocFileID, s.Caption, parseMode, s.ButtonText, s.ButtonDocFileID, s.ButtonURL)
+			messageID, sendErr = u.Sender.SendWithInlineButton(id, s.Text, s.PhotoFileID, s.DocFileID, s.Caption, parseMode, s.ButtonText, s.ButtonDocFileID, s.ButtonURL)
 		} else if s.PhotoFileID != "" {
-			sendErr = u.Sender.SendPhoto(id, s.PhotoFileID, s.Caption, s.CaptionParseMode)
+			messageID, sendErr = u.Sender.SendPhoto(id, s.PhotoFileID, s.Caption, s.CaptionParseMode)
 		} else if s.DocFileID != "" {
 			// caption у документа ограничен; передаём Caption, если есть, иначе Text
 			cap := s.Caption
 			if strings.TrimSpace(cap) == "" {
 				cap = s.Text
 			}
-			sendErr = u.Sender.SendDocument(id, s.DocFileID, cap, s.CaptionParseMode)
+			messageID, sendErr = u.Sender.SendDocument(id, s.DocFileID, cap, s.CaptionParseMode)
 		} else {
-			sendErr = u.Sender.SendText(id, s.Text, s.TextParseMode)
+			messageID, sendErr = u.Sender.SendText(id, s.Text, s.TextParseMode)
 		}
 		if sendErr != nil {
 			failed++
@@ -228,6 +250,20 @@ func (u *BroadcastUsecase) ConfirmSend(s *BroadcastSession, cmd string) (string,
 			continue
 		}
 		sent++
+		if u.Delivery != nil && messageID > 0 {
+			saveErr := u.Delivery.Save(BroadcastDelivery{
+				BroadcastKey: broadcastKey,
+				ChatID:       id,
+				MessageID:    messageID,
+				CreatedAt:    time.Now(),
+			})
+			if saveErr != nil {
+				trackingFailed = true
+				if firstTrackingErr == nil {
+					firstTrackingErr = saveErr
+				}
+			}
+		}
 	}
 	s.State = BStateIdle
 	s.Text = ""
@@ -240,8 +276,43 @@ func (u *BroadcastUsecase) ConfirmSend(s *BroadcastSession, cmd string) (string,
 	s.ButtonURL = ""
 	_ = u.Stat.Save(BroadcastStat{Total: len(ids), Sent: sent, Failed: failed})
 	summary := fmt.Sprintf("Рассылка отправлена: %d успешно, %d с ошибками.", sent, failed)
+	if trackingFailed {
+		return summary, fmt.Errorf("tracking save failed: %w", firstTrackingErr)
+	}
 	if failed > 0 {
 		return summary, fmt.Errorf("%d failed; sample error: %w", failed, firstErr)
+	}
+	return summary, nil
+}
+
+func (u *BroadcastUsecase) DeleteLastBroadcast() (string, error) {
+	if u.Delivery == nil {
+		return "Удаление рассылок недоступно: не подключено хранилище отправок.", errors.New("delivery repo is nil")
+	}
+	deliveries, err := u.Delivery.ListLastBroadcast()
+	if err != nil {
+		return "Не удалось получить последнюю рассылку для удаления.", err
+	}
+	if len(deliveries) == 0 {
+		return "Нет рассылок для удаления.", nil
+	}
+	var deleted, failed int
+	var firstErr error
+	for _, d := range deliveries {
+		delErr := u.Sender.DeleteMessage(d.ChatID, d.MessageID)
+		if delErr != nil {
+			failed++
+			if firstErr == nil {
+				firstErr = delErr
+			}
+			continue
+		}
+		deleted++
+	}
+	_ = u.Delivery.MarkBroadcastDeleted(deliveries[0].BroadcastKey, time.Now())
+	summary := fmt.Sprintf("Удаление последней рассылки: удалено %d, ошибок %d.", deleted, failed)
+	if failed > 0 {
+		return summary, fmt.Errorf("%d delete errors; sample error: %w", failed, firstErr)
 	}
 	return summary, nil
 }

@@ -96,7 +96,12 @@ func main() {
 		logger.Error("broadcast stat sqlite init error", "error", err)
 		os.Exit(1)
 	}
-	broadcastUC := usecase.NewBroadcastUsecase(userRepo, sender, statRepo)
+	deliveryRepo, err := sqliteRepo.NewBroadcastDeliveryRepo(dsn)
+	if err != nil {
+		logger.Error("broadcast delivery sqlite init error", "error", err)
+		os.Exit(1)
+	}
+	broadcastUC := usecase.NewBroadcastUsecase(userRepo, sender, statRepo, deliveryRepo)
 	funnelSQLRepo, err := sqliteRepo.NewFunnelRepo(dsn)
 	if err != nil {
 		logger.Error("funnel sqlite init error", "error", err)
